@@ -202,8 +202,8 @@ div[data-testid="stExpander"] details {{ border-color: var(--linha) !important;
 .stApp .stButton button, .stApp .stFormSubmitButton button,
 div[data-testid="stPopover"] button {{
     background: var(--item) !important; color: var(--ink) !important;
-    border: 1px solid var(--linha) !important; font-size: 13px !important;
-    padding: 4px 12px !important; }}
+    border: 1px solid var(--linha) !important; font-size: 12.5px !important;
+    padding: 2px 10px !important; min-height: 30px !important; }}
 .stApp .stButton button:hover, div[data-testid="stPopover"] button:hover {{
     border-color: var(--marca) !important; color: var(--marca) !important; }}
 .stApp button[kind="primary"], .stApp button[kind="primaryFormSubmit"] {{
@@ -223,8 +223,8 @@ span[data-baseweb="tag"] {{ background: var(--marca) !important; color: #fff !im
 /* ---------- cabeçalho ---------- */
 .eyebrow {{ font-size: 11px; font-weight: 800; letter-spacing: 2.4px;
             text-transform: uppercase; color: var(--marca); margin-bottom: 2px; }}
-.titulo-app {{ font-size: 27px; font-weight: 800; color: var(--ink);
-               letter-spacing: -.6px; margin: 0 0 4px 0; }}
+.titulo-app {{ font-size: 18px; font-weight: 800; color: var(--ink);
+               letter-spacing: -.3px; margin: 4px 0 0 0; }}
 .quem-sou {{ font-size: 12.5px; color: var(--texto); text-align: right; line-height: 1.45; }}
 .quem-sou b {{ color: var(--ink); font-size: 13.5px; }}
 .progresso {{ font-size: 11px; font-weight: 800; letter-spacing: 1.2px;
@@ -615,58 +615,66 @@ def form_novo_card(status: str, user: dict) -> None:
                     rerun()
 
 
-def form_rapido(user: dict) -> None:
-    """Criação de tarefa em painel suspenso — abre e fecha sem recarregar a página."""
+def conteudo_nova_tarefa(user: dict) -> None:
+    """Campos da criação rápida. Sem st.form: assim o campo de conclusão
+    aparece no instante em que a etapa Realizado é escolhida."""
     mapa = {u["nome"]: u["id"] for u in usuarios_ativos()}
-    with st.form("add_rapido", clear_on_submit=True):
-        titulo = st.text_input("Atividade", key="qa_tit")
-        coluna = st.selectbox("Coluna", STATUS_LIST, index=1, key="qa_col")
-        resp = st.multiselect("Responsáveis (@)", list(mapa), key="qa_resp")
-        prazo = st.date_input("Prazo", value=hoje() + timedelta(days=7),
-                              key="qa_prazo", **FMT_DATA)
-        fim_em = st.date_input("Concluída em (só vale para Realizado)", value=hoje(),
-                               key="qa_fim", **FMT_DATA)
-        if st.form_submit_button("Criar", type="primary", **LARG_FSB):
-            if not titulo.strip():
-                st.error("Informe a atividade.")
-            elif not resp:
-                st.error("Marque ao menos um responsável.")
-            else:
-                criar_tarefa(
-                    titulo, "", user["id"], hoje(), prazo, [mapa[n] for n in resp], coluna,
-                    datetime.combine(fim_em, datetime.min.time())
-                    if coluna == "Realizado" else None)
-                rerun()
+    titulo = st.text_input("Atividade", key="qa_tit")
+    etapa = st.selectbox("Etapa", STATUS_LIST, index=1, key="qa_col")
+    resp = st.multiselect("Responsáveis (@)", list(mapa), key="qa_resp")
+    prazo = st.date_input("Prazo", value=hoje() + timedelta(days=7), key="qa_prazo", **FMT_DATA)
+
+    fim_em = None
+    if etapa == "Realizado":
+        fim_em = st.date_input("Concluída em", value=hoje(), key="qa_fim", **FMT_DATA)
+
+    c1, c2 = st.columns(2)
+    if c1.button("Criar", type="primary", key="qa_criar", **LARG_BTN):
+        if not titulo.strip():
+            st.error("Informe a atividade.")
+        elif not resp:
+            st.error("Marque ao menos um responsável.")
+        else:
+            criar_tarefa(titulo, "", user["id"], hoje(), prazo,
+                         [mapa[n] for n in resp], etapa,
+                         datetime.combine(fim_em, datetime.min.time()) if fim_em else None)
+            for chave in ("qa_tit", "qa_resp"):
+                st.session_state.pop(chave, None)
+            st.session_state.abrir_novo = False
+            rerun()
+    if c2.button("Cancelar", key="qa_cancel", **LARG_BTN):
+        st.session_state.abrir_novo = False
+        rerun()
+
+
+# O diálogo mantém-se aberto entre interações — é o que permite o campo condicional.
+_dialogo_nova = (st.dialog("Nova tarefa")(conteudo_nova_tarefa)
+                 if hasattr(st, "dialog") else None)
+
+
+def iniciais(nome: str) -> str:
+    partes = [p for p in nome.split() if p]
+    return (partes[0][0] + (partes[-1][0] if len(partes) > 1 else "")).upper()
 
 
 def cabecalho(user: dict, paginas: list[str]) -> str:
-    """Título à esquerda; menu, novo, filtros e sair compactos à direita."""
+    """Título curto à esquerda; navegação, novo, filtros e conta à direita."""
     atual = st.session_state.get("pagina", "Kanban")
-    if atual not in paginas:
+    if atual not in paginas + ["Usuários", "Minha conta"]:
         atual = "Kanban"
 
-    titulo, menu_c, novo_c, filtro_c, sair_c = st.columns([9, 1, 1, 1, 0.75])
+    titulo, menu_c, novo_c, filtro_c, conta_c = st.columns([12, 1, 1, 1, 1])
 
     with titulo:
-        st.markdown("<div class='eyebrow'>Plano de ação</div>"
-                    "<div class='titulo-app'>Gestor de Tarefas</div>", unsafe_allow_html=True)
+        st.markdown("<div class='titulo-app'>Gestor de Tarefas</div>", unsafe_allow_html=True)
 
     with menu_c:
         if hasattr(st, "popover"):
             with st.popover("☰", **LARG_BTN):
-                st.markdown(f"<div class='meta'>{user['nome']} · "
-                            f"{'Administrador' if user['papel'] == 'admin' else 'Usuário'}</div>",
-                            unsafe_allow_html=True)
                 for p in paginas:
                     if st.button(("• " if p == atual else "") + p, key=f"nav_{p}", **LARG_BTN):
                         st.session_state.pagina = p
                         rerun()
-                st.divider()
-                claro = st.session_state.tema == "claro"
-                if st.button("Tema escuro" if claro else "Tema claro",
-                             key="nav_tema", **LARG_BTN):
-                    st.session_state.tema = "escuro" if claro else "claro"
-                    rerun()
         else:
             escolha = st.selectbox("Menu", paginas, index=paginas.index(atual),
                                    key="nav_sel", label_visibility="collapsed")
@@ -675,23 +683,49 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                 rerun()
 
     with novo_c:
-        if hasattr(st, "popover"):
-            with st.popover("＋", **LARG_BTN):
-                form_rapido(user)
+        if _dialogo_nova:
+            if st.button("＋", key="btn_novo", **LARG_BTN):
+                st.session_state.abrir_novo = True
+                rerun()
         else:
             with st.expander("＋"):
-                form_rapido(user)
+                conteudo_nova_tarefa(user)
 
     st.session_state.filtro_slot = filtro_c
 
-    with sair_c:
-        st.markdown("<div class='btn-sair'>", unsafe_allow_html=True)
-        if st.button("Sair", key="sair"):
-            encerrar_sessao(st.session_state.get("token"))
-            st.session_state.clear()
-            qp_limpar()
-            rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
+    with conta_c:
+        if hasattr(st, "popover"):
+            with st.popover(iniciais(user["nome"]), **LARG_BTN):
+                st.markdown(f"<b>{user['nome']}</b><br><span class='meta'>@{user['usuario']} · "
+                            f"{'Administrador' if user['papel'] == 'admin' else 'Usuário'}</span>",
+                            unsafe_allow_html=True)
+                st.divider()
+                if user["papel"] == "admin" and st.button("Usuários", key="cta_usuarios", **LARG_BTN):
+                    st.session_state.pagina = "Usuários"
+                    rerun()
+                if st.button("Minha conta", key="cta_conta", **LARG_BTN):
+                    st.session_state.pagina = "Minha conta"
+                    rerun()
+                claro = st.session_state.tema == "claro"
+                if st.button("Tema escuro" if claro else "Tema claro",
+                             key="cta_tema", **LARG_BTN):
+                    st.session_state.tema = "escuro" if claro else "claro"
+                    rerun()
+                st.divider()
+                if st.button("Sair", key="sair", **LARG_BTN):
+                    encerrar_sessao(st.session_state.get("token"))
+                    st.session_state.clear()
+                    qp_limpar()
+                    rerun()
+        else:
+            if st.button("Sair", key="sair"):
+                encerrar_sessao(st.session_state.get("token"))
+                st.session_state.clear()
+                qp_limpar()
+                rerun()
+
+    if st.session_state.get("abrir_novo") and _dialogo_nova:
+        _dialogo_nova(user)
 
     return atual
 
@@ -1281,9 +1315,6 @@ def main() -> None:
         return
 
     paginas = ["Kanban", "Calendário", "Lista", "Nova tarefa", "Prorrogações"]
-    if user["papel"] == "admin":
-        paginas.append("Usuários")
-    paginas.append("Minha conta")
 
     tarefas = listar_tarefas(user)
     pagina = cabecalho(user, paginas)
