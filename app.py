@@ -206,9 +206,16 @@ div[data-testid="stPopover"] button {{
     padding: 2px 10px !important; min-height: 30px !important; }}
 .stApp .stButton button:hover, div[data-testid="stPopover"] button:hover {{
     border-color: var(--marca) !important; color: var(--marca) !important; }}
-.stApp button[kind="primary"], .stApp button[kind="primaryFormSubmit"] {{
-    background: var(--marca) !important; color: #ffffff !important;
-    border-color: var(--marca) !important; }}
+.stApp button[kind="primary"], .stApp button[kind="primaryFormSubmit"],
+.stApp [data-testid="stBaseButton-primary"],
+.stApp [data-testid="stBaseButton-primaryFormSubmit"],
+.stApp [data-testid="baseButton-primary"],
+.stApp [data-testid="baseButton-primaryFormSubmit"] {{
+    background: {MARCA} !important; color: #ffffff !important;
+    border-color: {MARCA} !important; }}
+.stApp button[kind="primary"]:hover, .stApp [data-testid="stBaseButton-primary"]:hover {{
+    background: {MARCA_ESCURO} !important; border-color: {MARCA_ESCURO} !important;
+    color: #ffffff !important; }}
 
 /* painéis flutuantes (menu, filtros, adicionar) e listas de opções */
 div[data-baseweb="popover"] > div, div[data-baseweb="menu"], ul[data-baseweb="menu"] {{
@@ -568,6 +575,7 @@ def pedidos_para_decidir(user: dict) -> list[dict]:
 # --------------------------------------------------------------------------- #
 
 def abrir_tarefa(tid: int, user: dict) -> None:
+    st.session_state.abrir_novo = False
     registrar_abertura(tid, user)
     st.session_state.tarefa_sel = tid
     rerun()
@@ -674,6 +682,7 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                 for p in paginas:
                     if st.button(("• " if p == atual else "") + p, key=f"nav_{p}", **LARG_BTN):
                         st.session_state.pagina = p
+                        st.session_state.abrir_novo = False
                         rerun()
         else:
             escolha = st.selectbox("Menu", paginas, index=paginas.index(atual),
@@ -702,14 +711,17 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                 st.divider()
                 if user["papel"] == "admin" and st.button("Usuários", key="cta_usuarios", **LARG_BTN):
                     st.session_state.pagina = "Usuários"
+                    st.session_state.abrir_novo = False
                     rerun()
                 if st.button("Minha conta", key="cta_conta", **LARG_BTN):
                     st.session_state.pagina = "Minha conta"
+                    st.session_state.abrir_novo = False
                     rerun()
                 claro = st.session_state.tema == "claro"
                 if st.button("Tema escuro" if claro else "Tema claro",
                              key="cta_tema", **LARG_BTN):
                     st.session_state.tema = "escuro" if claro else "claro"
+                    st.session_state.abrir_novo = False
                     rerun()
                 st.divider()
                 if st.button("Sair", key="sair", **LARG_BTN):
@@ -723,6 +735,11 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                 st.session_state.clear()
                 qp_limpar()
                 rerun()
+
+    # Se a página mudou desde o último desenho, o diálogo não deve reaparecer.
+    if st.session_state.get("pagina_anterior") != atual:
+        st.session_state.pagina_anterior = atual
+        st.session_state.abrir_novo = False
 
     if st.session_state.get("abrir_novo") and _dialogo_nova:
         _dialogo_nova(user)
@@ -1161,12 +1178,18 @@ def tela_detalhe(tid: int, user: dict) -> None:
                     st.session_state.tarefa_sel = None
                     rerun()
 
-        st.markdown("##### Histórico")
-        for e in consultar("""SELECT h.*, u.nome FROM historico h
-                              LEFT JOIN usuarios u ON u.id = h.usuario_id
-                              WHERE h.tarefa_id = %s ORDER BY h.id DESC""", (tid,)):
-            st.markdown(f"**{e['acao']}** — {e['nome'] or 'Sistema'} · {fmt_hora(e['criado_em'])}  \n"
-                        f"<span class='meta'>{e['detalhe'] or ''}</span>", unsafe_allow_html=True)
+        eventos = consultar("""SELECT h.*, u.nome FROM historico h
+                               LEFT JOIN usuarios u ON u.id = h.usuario_id
+                               WHERE h.tarefa_id = %s ORDER BY h.id DESC""", (tid,))
+        ultimo = eventos[0] if eventos else None
+        if ultimo:
+            st.markdown(f"<div class='meta'>Última movimentação: <b>{ultimo['acao']}</b> — "
+                        f"{ultimo['nome'] or 'Sistema'} · {fmt_hora(ultimo['criado_em'])}</div>",
+                        unsafe_allow_html=True)
+        with st.expander(f"Histórico ({len(eventos)} registro(s))"):
+            for e in eventos:
+                st.markdown(f"**{e['acao']}** — {e['nome'] or 'Sistema'} · {fmt_hora(e['criado_em'])}  \n"
+                            f"<span class='meta'>{e['detalhe'] or ''}</span>", unsafe_allow_html=True)
 
         with st.form("comentario", clear_on_submit=True):
             texto = st.text_area("Adicionar comentário ao histórico", height=80, key="det_coment")
@@ -1311,6 +1334,7 @@ def main() -> None:
     st.session_state.setdefault("tarefa_sel", None)
 
     if st.session_state.tarefa_sel:
+        st.session_state.abrir_novo = False
         tela_detalhe(st.session_state.tarefa_sel, user)
         return
 
