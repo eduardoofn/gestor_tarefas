@@ -15,7 +15,8 @@ Execução:
     pip install -r requirements.txt
     streamlit run app.py
 
-Login inicial: admin / admin123
+Primeiro acesso: usuário 'admin'. A senha vem de [admin].senha no
+secrets.toml (ou da variável ADMIN_SENHA) e só é usada ao criar o banco.
 """
 
 from __future__ import annotations
@@ -149,15 +150,42 @@ div[data-testid="stToolbar"] {{ right: 8px; }}
 div[data-testid="stExpander"] details {{ border-color: var(--linha) !important;
                                          background: var(--painel) !important; }}
 
-/* legibilidade dos componentes nativos, principalmente no tema claro */
+/* Todo o visual dos componentes nativos vem daqui — o app não depende de
+   .streamlit/config.toml, então funciona igual no local e no Streamlit Cloud. */
 .stApp, .stApp .stMarkdown p, .stApp .stMarkdown li {{ color: var(--ink); }}
 [data-testid="stWidgetLabel"] p, .stApp label p, .stApp label {{
     color: var(--texto) !important; font-weight: 600; }}
-.stApp input, .stApp textarea {{ color: var(--ink) !important; }}
-div[data-baseweb="input"], div[data-baseweb="textarea"], div[data-baseweb="select"] > div {{
+
+/* campos de texto, área de texto, seletores e data */
+.stApp input, .stApp textarea, .stApp [data-baseweb="select"] * {{
+    color: var(--ink) !important; -webkit-text-fill-color: var(--ink) !important; }}
+.stApp input::placeholder, .stApp textarea::placeholder {{
+    color: var(--muted) !important; -webkit-text-fill-color: var(--muted) !important; }}
+div[data-baseweb="input"], div[data-baseweb="base-input"], div[data-baseweb="textarea"],
+div[data-baseweb="select"] > div, .stApp [data-testid="stDateInput"] > div > div {{
     background: var(--item) !important; border-color: var(--linha) !important; }}
-div[data-baseweb="popover"] div[data-baseweb="menu"] {{ background: var(--painel) !important; }}
+
+/* botões */
+.stApp .stButton button, .stApp .stFormSubmitButton button,
+div[data-testid="stPopover"] button {{
+    background: var(--item) !important; color: var(--ink) !important;
+    border: 1px solid var(--linha) !important; font-size: 13px !important;
+    padding: 4px 12px !important; }}
+.stApp .stButton button:hover, div[data-testid="stPopover"] button:hover {{
+    border-color: var(--marca) !important; color: var(--marca) !important; }}
+.stApp button[kind="primary"], .stApp button[kind="primaryFormSubmit"] {{
+    background: var(--marca) !important; color: #ffffff !important;
+    border-color: var(--marca) !important; }}
+
+/* painéis flutuantes (menu, filtros, adicionar) e listas de opções */
+div[data-baseweb="popover"] > div, div[data-baseweb="menu"], ul[data-baseweb="menu"] {{
+    background: var(--painel) !important; color: var(--ink) !important;
+    border: 1px solid var(--linha) !important; }}
+div[data-baseweb="popover"] li, div[data-baseweb="menu"] li {{ color: var(--ink) !important; }}
+span[data-baseweb="tag"] {{ background: var(--marca) !important; color: #fff !important; }}
+
 .stApp [data-testid="stCaptionContainer"] p {{ color: var(--muted) !important; }}
+.stApp [data-testid="stExpander"] summary p {{ color: var(--texto) !important; }}
 
 /* ---------- cabeçalho ---------- */
 .eyebrow {{ font-size: 11px; font-weight: 800; letter-spacing: 2.4px;
@@ -613,8 +641,7 @@ def tela_login() -> None:
     _, meio, _ = st.columns([1, 1.2, 1])
     with meio:
         st.markdown("<div class='eyebrow'>Plano de ação</div>"
-                    "<div class='titulo-app'>Gestor de Tarefas</div>"
-                    "<div class='meta'>Kanban e Calendário para acompanhar quem faz o quê, e até quando.</div><br>",
+                    "<div class='titulo-app'>Gestor de Tarefas</div><br>",
                     unsafe_allow_html=True)
         with st.form("login"):
             usuario = st.text_input("Usuário", key="log_user")
@@ -628,7 +655,6 @@ def tela_login() -> None:
                     rerun()
                 else:
                     st.error("Usuário ou senha inválidos.")
-        st.info("Primeiro acesso: **admin / admin123**")
 
 
 def montar_colunas(tarefas: list[dict]) -> list[dict]:
@@ -656,33 +682,35 @@ def montar_colunas(tarefas: list[dict]) -> list[dict]:
 
 
 def barra_adicionar(user: dict) -> None:
-    """Um botão '+' discreto por coluna; os campos abrem ao clicar."""
+    """Botões '+' discretos, um por coluna; os campos só aparecem ao clicar."""
     mapa = {u["nome"]: u["id"] for u in usuarios_ativos()}
-    for col, status in zip(st.columns(len(STATUS_LIST), gap="small"), STATUS_LIST):
+    larguras = [1] * len(STATUS_LIST) + [len(STATUS_LIST) * 2]
+    colunas = st.columns(larguras, gap="small")
+    for col, status in zip(colunas, STATUS_LIST):
         with col:
-            abridor = (st.popover(f"＋  {status}", **LARG_BTN)
-                       if hasattr(st, "popover") else st.expander(f"＋  {status}"))
+            abridor = (st.popover(f"＋ {status}")
+                       if hasattr(st, "popover") else st.expander(f"＋ {status}"))
             with abridor:
                 with st.form(f"add_{status}", clear_on_submit=True):
-                    titulo = st.text_input("Atividade", key=f"add_tit_{status}",
-                                           placeholder="O quê precisa ser feito?")
+                    titulo = st.text_input("Atividade", key=f"add_tit_{status}")
                     resp = st.multiselect("Responsáveis (@)", list(mapa),
                                           key=f"add_resp_{status}")
                     prazo = st.date_input("Prazo", value=hoje() + timedelta(days=7),
                                           key=f"add_prazo_{status}", **FMT_DATA)
-                    fim = None
+                    fim_em = None
                     if status == "Realizado":
-                        fim = st.date_input("Data de conclusão", value=hoje(),
-                                            key=f"add_fim_{status}", **FMT_DATA)
+                        fim_em = st.date_input("Concluída em", value=hoje(),
+                                               key=f"add_fim_{status}", **FMT_DATA)
                     if st.form_submit_button("Criar", type="primary", **LARG_FSB):
                         if not titulo.strip():
                             st.error("Informe a atividade.")
                         elif not resp:
                             st.error("Marque ao menos um responsável.")
                         else:
-                            criar_tarefa(titulo, "", user["id"], hoje(), prazo,
-                                         [mapa[n] for n in resp], status,
-                                         datetime.combine(fim, datetime.min.time()) if fim else None)
+                            criar_tarefa(
+                                titulo, "", user["id"], hoje(), prazo,
+                                [mapa[n] for n in resp], status,
+                                datetime.combine(fim_em, datetime.min.time()) if fim_em else None)
                             rerun()
 
 
@@ -726,7 +754,6 @@ def aba_calendario(tarefas: list[dict], user: dict) -> None:
         st.session_state.cal_ano, st.session_state.cal_mes = hoje().year, hoje().month
         rerun()
 
-    st.caption("Cada tarefa aparece no dia do seu prazo.")
 
     por_dia: dict[date, list[dict]] = {}
     for t in tarefas:
@@ -779,8 +806,6 @@ def aba_lista(tarefas: list[dict], user: dict) -> None:
 
 
 def aba_nova_tarefa(user: dict) -> None:
-    st.markdown("#### Nova tarefa")
-    st.caption("O quê, quem e quando. Use o Backlog para o que ainda não começou.")
     mapa = {u["nome"]: u["id"] for u in usuarios_ativos()}
     with st.form("nova_tarefa", clear_on_submit=True):
         titulo = st.text_input("O quê — atividade (título)", key="nt_titulo",
@@ -955,7 +980,6 @@ def tela_detalhe(tid: int, user: dict) -> None:
                             atualizar_tarefa(t, novo_tit, nova_desc, novo_ini,
                                              [mapa[n] for n in novos], user)
                             rerun()
-                st.caption("O prazo só muda por prorrogação, para preservar o histórico.")
 
             with st.expander("Excluir tarefa"):
                 st.warning("A exclusão apaga responsáveis, prorrogações e histórico da tarefa.")
@@ -1044,6 +1068,21 @@ def tela_detalhe(tid: int, user: dict) -> None:
 # Aplicação
 # --------------------------------------------------------------------------- #
 
+def senha_admin_inicial() -> str:
+    """Senha do primeiro admin: vem de secrets [admin] senha, ou da env ADMIN_SENHA."""
+    try:
+        if "admin" in st.secrets and "senha" in st.secrets["admin"]:
+            return str(st.secrets["admin"]["senha"])
+    except Exception:
+        pass
+    return os.getenv("ADMIN_SENHA", "trocar-esta-senha")
+
+
+def semear_admin() -> None:
+    """Roda uma única vez, quando o banco ainda não tem nenhum usuário."""
+    criar_usuario("Administrador", "admin", "", senha_admin_inicial(), "admin")
+
+
 def menu_navegacao(user: dict, tarefas: list[dict]) -> tuple[str, list[dict]]:
     """Menu recolhido e filtros lado a lado, ambos compactos."""
     paginas = ["Kanban", "Calendário", "Lista", "Nova tarefa", "Prorrogações"]
@@ -1105,8 +1144,7 @@ def main() -> None:
     st.markdown(montar_css(st.session_state.tema), unsafe_allow_html=True)
 
     try:
-        init_db(lambda: criar_usuario("Administrador", "admin", "admin@local",
-                                      "admin123", "admin"))
+        init_db(semear_admin)
     except ErroBanco as erro:
         cfg = config_db()
         st.error("**Não foi possível conectar ao PostgreSQL.**")
