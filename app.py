@@ -40,9 +40,19 @@ _PASTA_QUADRO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quadro
 _quadro_componente = components.declare_component("quadro_tarefas", path=_PASTA_QUADRO)
 
 
+_PASTA_CALENDARIO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calendario")
+_calendario_componente = components.declare_component("calendario_tarefas",
+                                                      path=_PASTA_CALENDARIO)
+
+
 def quadro_kanban(colunas: list[dict], tema: dict, key: str = "quadro"):
-    """Devolve {"acao": "mover"|"abrir", "id": int, ...} ou None."""
+    """Devolve {"acao": "mover"|"abrir"|"novo", ...} ou None."""
     return _quadro_componente(colunas=colunas, tema=tema, default=None, key=key)
+
+
+def calendario_mes(dados: dict, key: str = "calendario"):
+    """Devolve {"acao": "abrir"|"novo"|"mes", ...} ou None."""
+    return _calendario_componente(**dados, default=None, key=key)
 
 # --------------------------------------------------------------------------- #
 # Constantes
@@ -732,17 +742,21 @@ def montar_colunas(tarefas: list[dict]) -> list[dict]:
     return colunas
 
 
-def form_nova_tarefa_coluna(status: str, user: dict) -> None:
-    """Formulário que aparece só quando o + da coluna é clicado."""
+def form_nova_tarefa_coluna(status: str, user: dict, prazo_sugerido=None) -> None:
+    """Formulário que aparece quando o + da coluna (ou do dia) é clicado."""
     mapa = {u["nome"]: u["id"] for u in usuarios_ativos()}
     with caixa():
-        st.markdown(f"<b>Nova tarefa em {status}</b>", unsafe_allow_html=True)
+        titulo_form = (f"Nova tarefa com prazo em {fmt_data(prazo_sugerido)}"
+                       if prazo_sugerido else f"Nova tarefa em {status}")
+        st.markdown(f"<b>{titulo_form}</b>", unsafe_allow_html=True)
         with st.form(f"add_{status}", clear_on_submit=True):
             c1, c2, c3 = st.columns([3, 2, 1.4])
             titulo = c1.text_input("Atividade", key=f"add_tit_{status}")
             resp = c2.multiselect("Responsáveis (@)", list(mapa), key=f"add_resp_{status}")
-            prazo = c3.date_input("Prazo", value=hoje() + timedelta(days=7),
+            prazo = c3.date_input("Prazo", value=prazo_sugerido or hoje() + timedelta(days=7),
                                   key=f"add_prazo_{status}", **FMT_DATA)
+            if prazo_sugerido:
+                status = c2.selectbox("Coluna", STATUS_LIST, index=1, key="add_col_cal")
             fim_em = None
             if status == "Realizado":
                 fim_em = c3.date_input("Concluída em", value=hoje(),
@@ -752,6 +766,7 @@ def form_nova_tarefa_coluna(status: str, user: dict) -> None:
             cancelar = b2.form_submit_button("Cancelar", **LARG_FSB)
             if cancelar:
                 st.session_state.nova_em = None
+                st.session_state.nova_data = None
                 rerun()
             if criar:
                 if not titulo.strip():
@@ -764,6 +779,7 @@ def form_nova_tarefa_coluna(status: str, user: dict) -> None:
                         [mapa[n] for n in resp], status,
                         datetime.combine(fim_em, datetime.min.time()) if fim_em else None)
                     st.session_state.nova_em = None
+                    st.session_state.nova_data = None
                     rerun()
 
 
@@ -789,55 +805,77 @@ def aba_kanban(tarefas: list[dict], user: dict) -> None:
                 abrir_tarefa(alvo["id"], user)
 
 
+def montar_calendario(tarefas: list[dict], ano: int, mes: int) -> dict:
+    por_prazo: dict[date, list[dict]] = {}
+    inicios: dict[date, int] = {}
+    for t in tarefas:
+        por_prazo.setdefault(t["prazo_atual"], []).append(t)
+        inicios[t["data_inicio"]] = inicios.get(t["data_inicio"], 0) + 1
+
+    dias = []
+    for semana in calmod.Calendar(firstweekday=6).monthdatescalendar(ano, mes):
+        for dia in semana:
+            itens = []
+            for t in por_prazo.get(dia, []):
+                cor = CORES["Atrasado"] if eh_atrasada(t) else CORES[t["status"]]
+                itens.append({
+                    "id": t["id"],
+                    "titulo": t["titulo"],
+                    "completo": f"#{t['id']} {t['titulo']} — {t['responsaveis'] or 'sem responsável'}"
+                                f" ({t['status']})",
+                    "cor": cor,
+                })
+            dias.append({
+                "data": dia.isoformat(),
+                "numero": dia.day,
+                "fora": dia.month != mes,
+                "hoje": dia == hoje(),
+                "itens": itens,
+                "inicios": inicios.get(dia, 0) if dia.month == mes else 0,
+            })
+
+    return {
+        "titulo": f"{MESES[mes - 1]} de {ano}",
+        "semana": DIAS_SEMANA,
+        "dias": dias,
+        "legenda": [{"nome": s, "cor": CORES[s]} for s in STATUS_LIST]
+                   + [{"nome": "Atrasada", "cor": CORES["Atrasado"]}],
+        "tema": {**TEMAS[st.session_state.tema], "marca": MARCA},
+    }
+
+
 def aba_calendario(tarefas: list[dict], user: dict) -> None:
     st.session_state.setdefault("cal_ano", hoje().year)
     st.session_state.setdefault("cal_mes", hoje().month)
 
-    nav = st.columns([1, 1, 5, 1])
-    if nav[0].button("◀", key="cal_ant", **LARG_BTN):
-        st.session_state.cal_mes -= 1
-        if st.session_state.cal_mes == 0:
-            st.session_state.cal_mes, st.session_state.cal_ano = 12, st.session_state.cal_ano - 1
-        rerun()
-    if nav[1].button("▶", key="cal_prox", **LARG_BTN):
-        st.session_state.cal_mes += 1
-        if st.session_state.cal_mes == 13:
-            st.session_state.cal_mes, st.session_state.cal_ano = 1, st.session_state.cal_ano + 1
-        rerun()
-    ano, mes = st.session_state.cal_ano, st.session_state.cal_mes
-    nav[2].markdown(f"<div style='font-size:19px;font-weight:700;padding-top:4px'>"
-                    f"{MESES[mes - 1]} de {ano}</div>", unsafe_allow_html=True)
-    if nav[3].button("Hoje", key="cal_hoje", **LARG_BTN):
-        st.session_state.cal_ano, st.session_state.cal_mes = hoje().year, hoje().month
-        rerun()
+    if st.session_state.get("nova_em"):
+        form_nova_tarefa_coluna(st.session_state.nova_em, user,
+                                st.session_state.get("nova_data"))
 
+    dados = montar_calendario(tarefas, st.session_state.cal_ano, st.session_state.cal_mes)
+    evento = calendario_mes(dados, key="calendario")
 
-    por_dia: dict[date, list[dict]] = {}
-    for t in tarefas:
-        por_dia.setdefault(t["prazo_atual"], []).append(t)
-
-    for col, dia in zip(st.columns(7), DIAS_SEMANA):
-        col.markdown(f"<div class='meta' style='text-align:center;font-weight:700'>{dia}</div>",
-                     unsafe_allow_html=True)
-
-    for semana in calmod.Calendar(firstweekday=6).monthdatescalendar(ano, mes):
-        for col, dia in zip(st.columns(7, gap="small"), semana):
-            with col:
-                with caixa():
-                    classe = "dia-num" if dia.month == mes else "dia-num dia-fora"
-                    numero = f"<span class='dia-hoje'>{dia.day}</span>" if dia == hoje() else str(dia.day)
-                    st.markdown(f"<div class='{classe}'>{numero}</div>", unsafe_allow_html=True)
-                    itens = por_dia.get(dia, [])
-                    for t in itens[:3]:
-                        cor = CORES["Atrasado"] if eh_atrasada(t) else CORES[t["status"]]
-                        st.markdown(f"<span class='dot' style='background:{cor}'></span>",
-                                    unsafe_allow_html=True)
-                        rotulo = t["titulo"][:16] + ("…" if len(t["titulo"]) > 16 else "")
-                        if st.button(rotulo, key=f"cal_{dia}_{t['id']}", **LARG_BTN):
-                            abrir_tarefa(t["id"], user)
-                    if len(itens) > 3:
-                        st.markdown(f"<div class='meta'>+{len(itens) - 3} tarefa(s)</div>",
-                                    unsafe_allow_html=True)
+    if evento and evento.get("n") != st.session_state.get("ultimo_evento"):
+        st.session_state.ultimo_evento = evento["n"]
+        if evento["acao"] == "mes":
+            delta = evento["delta"]
+            if delta == 0:
+                st.session_state.cal_ano, st.session_state.cal_mes = hoje().year, hoje().month
+            else:
+                mes = st.session_state.cal_mes + delta
+                ano = st.session_state.cal_ano
+                if mes == 0:
+                    mes, ano = 12, ano - 1
+                elif mes == 13:
+                    mes, ano = 1, ano + 1
+                st.session_state.cal_mes, st.session_state.cal_ano = mes, ano
+            rerun()
+        elif evento["acao"] == "abrir":
+            abrir_tarefa(evento["id"], user)
+        elif evento["acao"] == "novo":
+            st.session_state.nova_em = "Iniciado"
+            st.session_state.nova_data = date.fromisoformat(evento["data"])
+            rerun()
 
 
 def aba_lista(tarefas: list[dict], user: dict) -> None:

@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Source Sans Pro", -apple-system, Segoe UI, sans-serif; }
+
+  .topo { display: flex; align-items: center; gap: 10px; padding: 2px 2px 14px 2px; }
+  .mes { font-size: 20px; font-weight: 800; letter-spacing: -.3px; }
+  .nav { display: flex; gap: 6px; margin-left: 4px; }
+  .nav button, .hoje {
+    border-radius: 8px; padding: 4px 11px; font-size: 13px; font-weight: 600;
+    cursor: pointer; background: transparent; transition: all .12s ease;
+  }
+  .nav button:hover, .hoje:hover { border-color: var(--marca) !important; color: var(--marca) !important; }
+  .legenda { margin-left: auto; display: flex; gap: 14px; align-items: center; font-size: 11.5px; }
+  .leg { display: flex; align-items: center; gap: 6px; }
+  .bolinha { width: 8px; height: 8px; border-radius: 999px; flex: none; }
+
+  .grade { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+  .cabec { text-align: center; font-size: 10.5px; font-weight: 800; letter-spacing: 1.2px;
+           text-transform: uppercase; padding: 4px 0 8px 0; }
+
+  .dia { border-radius: 10px; padding: 7px; min-height: 108px; display: flex;
+         flex-direction: column; gap: 4px; position: relative;
+         transition: border-color .12s ease; }
+  .dia:hover { border-color: var(--marca) !important; }
+  .dia.fora { opacity: .38; }
+  .dia-topo { display: flex; align-items: center; justify-content: space-between; }
+  .num { font-size: 12px; font-weight: 800; }
+  .num.hoje-marca { background: var(--marca); color: #fff; border-radius: 7px; padding: 1px 7px; }
+  .add-dia { opacity: 0; font-size: 15px; font-weight: 700; line-height: 1; cursor: pointer;
+             padding: 0 4px; transition: opacity .12s ease; }
+  .dia:hover .add-dia { opacity: .8; }
+  .add-dia:hover { color: var(--marca); }
+
+  .chip { border-left: 3px solid; border-radius: 5px; padding: 3px 6px; font-size: 11px;
+          line-height: 1.35; cursor: pointer; overflow: hidden; text-overflow: ellipsis;
+          white-space: nowrap; transition: transform .1s ease; }
+  .chip:hover { transform: translateX(2px); }
+  .mais-chip { font-size: 10.5px; padding-left: 4px; cursor: default; }
+  .inicio { font-size: 10px; opacity: .75; padding-left: 3px; }
+
+  .rodape { font-size: 11.5px; padding-top: 10px; }
+</style>
+</head>
+<body>
+<div id="raiz"></div>
+
+<script>
+function enviar(v) {
+  window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setComponentValue",
+                              value: v, dataType: "json" }, "*");
+}
+function altura() {
+  window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setFrameHeight",
+                              height: document.documentElement.scrollHeight }, "*");
+}
+
+let T = {};
+
+function desenhar(dados) {
+  T = dados.tema || {};
+  document.body.style.setProperty("--marca", T.marca);
+  document.body.style.color = T.ink;
+
+  const raiz = document.getElementById("raiz");
+  raiz.innerHTML = "";
+
+  // ---------------- topo: mês, navegação e legenda ----------------
+  const topo = document.createElement("div");
+  topo.className = "topo";
+
+  const mes = document.createElement("div");
+  mes.className = "mes";
+  mes.textContent = dados.titulo;
+  topo.appendChild(mes);
+
+  const nav = document.createElement("div");
+  nav.className = "nav";
+  [["‹", -1], ["›", 1]].forEach(([txt, delta]) => {
+    const b = document.createElement("button");
+    b.textContent = txt;
+    b.style.border = "1px solid " + T.linha;
+    b.style.color = T.texto;
+    b.onclick = () => enviar({ acao: "mes", delta: delta, n: Date.now() });
+    nav.appendChild(b);
+  });
+  const hoje = document.createElement("button");
+  hoje.className = "hoje";
+  hoje.textContent = "Hoje";
+  hoje.style.border = "1px solid " + T.linha;
+  hoje.style.color = T.texto;
+  hoje.onclick = () => enviar({ acao: "mes", delta: 0, n: Date.now() });
+  nav.appendChild(hoje);
+  topo.appendChild(nav);
+
+  const legenda = document.createElement("div");
+  legenda.className = "legenda";
+  legenda.style.color = T.muted;
+  legenda.innerHTML = (dados.legenda || []).map(l =>
+    `<span class="leg"><span class="bolinha" style="background:${l.cor}"></span>${l.nome}</span>`
+  ).join("");
+  topo.appendChild(legenda);
+
+  raiz.appendChild(topo);
+
+  // ---------------- grade ----------------
+  const grade = document.createElement("div");
+  grade.className = "grade";
+
+  (dados.semana || []).forEach(d => {
+    const c = document.createElement("div");
+    c.className = "cabec";
+    c.style.color = T.muted;
+    c.textContent = d;
+    grade.appendChild(c);
+  });
+
+  (dados.dias || []).forEach(dia => {
+    const cel = document.createElement("div");
+    cel.className = "dia" + (dia.fora ? " fora" : "");
+    cel.style.background = dia.hoje ? T.item : T.painel;
+    cel.style.border = "1px solid " + (dia.hoje ? T.marca : T.linha);
+
+    const cabec = document.createElement("div");
+    cabec.className = "dia-topo";
+    cabec.innerHTML = `<span class="num ${dia.hoje ? "hoje-marca" : ""}" ` +
+                      `style="${dia.hoje ? "" : "color:" + T.texto}">${dia.numero}</span>`;
+
+    const add = document.createElement("span");
+    add.className = "add-dia";
+    add.textContent = "+";
+    add.title = "Criar tarefa com prazo neste dia";
+    add.style.color = T.muted;
+    add.onclick = ev => { ev.stopPropagation();
+                          enviar({ acao: "novo", data: dia.data, n: Date.now() }); };
+    cabec.appendChild(add);
+    cel.appendChild(cabec);
+
+    (dia.itens || []).slice(0, 3).forEach(it => {
+      const chip = document.createElement("div");
+      chip.className = "chip";
+      chip.style.background = it.cor + "1f";
+      chip.style.borderLeftColor = it.cor;
+      chip.style.color = T.ink;
+      chip.title = it.completo;
+      chip.textContent = it.titulo;
+      chip.onclick = () => enviar({ acao: "abrir", id: it.id, n: Date.now() });
+      cel.appendChild(chip);
+    });
+
+    if ((dia.itens || []).length > 3) {
+      const m = document.createElement("div");
+      m.className = "mais-chip";
+      m.style.color = T.muted;
+      m.textContent = `+${dia.itens.length - 3} tarefa(s)`;
+      cel.appendChild(m);
+    }
+
+    if (dia.inicios) {
+      const i = document.createElement("div");
+      i.className = "inicio";
+      i.style.color = T.muted;
+      i.textContent = `▸ ${dia.inicios} iniciando`;
+      cel.appendChild(i);
+    }
+
+    grade.appendChild(cel);
+  });
+
+  raiz.appendChild(grade);
+
+  const rod = document.createElement("div");
+  rod.className = "rodape";
+  rod.style.color = T.muted;
+  rod.textContent = "Cada tarefa aparece no dia do prazo · clique para abrir · + no canto do dia para criar";
+  raiz.appendChild(rod);
+
+  altura();
+}
+
+window.addEventListener("message", ev => {
+  if (!ev.data || ev.data.type !== "streamlit:render") return;
+  desenhar(ev.data.args || {});
+});
+
+window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:componentReady",
+                            apiVersion: 1 }, "*");
+window.addEventListener("resize", altura);
+</script>
+</body>
+</html>

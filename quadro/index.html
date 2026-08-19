@@ -16,6 +16,10 @@
   .bolinha { width: 9px; height: 9px; border-radius: 999px; flex: none; }
   .contador { margin-left: auto; padding: 1px 9px; border-radius: 7px; font-weight: 700;
               font-size: 11px; }
+  .mais { width: 24px; height: 24px; border-radius: 7px; display: flex; align-items: center;
+          justify-content: center; font-size: 17px; font-weight: 700; line-height: 1;
+          cursor: pointer; margin-left: 8px; transition: all .12s ease; }
+  .mais:hover { transform: scale(1.08); }
 
   .corpo { display: flex; flex-direction: column; gap: 8px; min-height: 420px;
            max-height: 68vh; overflow-y: auto; padding: 3px; border-radius: 8px;
@@ -84,6 +88,18 @@ function desenhar(colunas, tema) {
     topo.innerHTML =
       `<span class="bolinha" style="background:${col.cor}"></span>${col.nome}` +
       `<span class="contador" style="background:${T.item};border:1px solid ${T.linha};color:${T.texto}">${col.cards.length}</span>`;
+
+    const mais = document.createElement("div");
+    mais.className = "mais";
+    mais.title = "Adicionar em " + col.nome;
+    mais.textContent = "+";
+    mais.style.background = col.cor + "22";
+    mais.style.border = "1px solid " + col.cor + "66";
+    mais.style.color = col.cor;
+    mais.addEventListener("click", () =>
+      enviar({ acao: "novo", coluna: col.nome, n: Date.now() }));
+    topo.appendChild(mais);
+
     c.appendChild(topo);
 
     const corpo = document.createElement("div");
@@ -123,7 +139,7 @@ function desenhar(colunas, tema) {
   const dica = document.createElement("div");
   dica.className = "dica";
   dica.style.color = T.muted;
-  dica.textContent = "Arraste para mudar de coluna · dê dois cliques no cartão para abrir";
+  dica.textContent = "Arraste para mudar de coluna · dois cliques no cartão para abrir · + para criar";
   raiz.appendChild(dica);
 
   altura();
