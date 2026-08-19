@@ -193,8 +193,8 @@ MIGRACOES = [
 ]
 
 
-def init_db(seed_admin) -> None:
-    """Cria o schema uma única vez por processo. seed_admin() cria o usuário inicial."""
+def init_db() -> None:
+    """Cria o schema uma única vez por processo."""
     global _iniciado
     if _iniciado:
         return
@@ -202,6 +202,9 @@ def init_db(seed_admin) -> None:
         executar(ddl)
     for mig in MIGRACOES:
         executar(mig)
-    if not consultar_um("SELECT id FROM usuarios LIMIT 1"):
-        seed_admin()
     _iniciado = True
+
+
+def banco_vazio() -> bool:
+    """True quando ainda não existe nenhum usuário cadastrado."""
+    return consultar_um("SELECT id FROM usuarios LIMIT 1") is None

@@ -15,8 +15,8 @@ Execução:
     pip install -r requirements.txt
     streamlit run app.py
 
-Primeiro acesso: usuário 'admin'. A senha vem de [admin].senha no
-secrets.toml (ou da variável ADMIN_SENHA) e só é usada ao criar o banco.
+Primeiro acesso: com o banco vazio, o app pede a criação do administrador
+na própria tela. A partir daí, usuários são apenas linhas na tabela usuarios.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from datetime import date, datetime, timedelta
 
 import streamlit as st
 
-from db import (ErroBanco, config_db, consultar, consultar_um,
+from db import (ErroBanco, banco_vazio, config_db, consultar, consultar_um,
                 executar, init_db, inserir)
 
 import streamlit.components.v1 as components
@@ -156,14 +156,37 @@ div[data-testid="stExpander"] details {{ border-color: var(--linha) !important;
 [data-testid="stWidgetLabel"] p, .stApp label p, .stApp label {{
     color: var(--texto) !important; font-weight: 600; }}
 
-/* campos de texto, área de texto, seletores e data */
-.stApp input, .stApp textarea, .stApp [data-baseweb="select"] * {{
-    color: var(--ink) !important; -webkit-text-fill-color: var(--ink) !important; }}
+/* ---- campos: o Streamlit pinta o INVÓLUCRO, o input em si é transparente ---- */
+.stApp .stTextInput > div > div, .stApp .stTextArea > div > div,
+.stApp .stDateInput > div > div, .stApp .stNumberInput > div > div,
+.stApp .stSelectbox > div > div, .stApp .stMultiSelect > div > div,
+.stApp [data-testid="stTextInputRootElement"],
+.stApp [data-testid="stWidgetLabel"] + div > div,
+.stApp div[data-baseweb="input"], .stApp div[data-baseweb="base-input"],
+.stApp div[data-baseweb="textarea"], .stApp div[data-baseweb="select"] > div {{
+    background-color: {p['item']} !important;
+    border-color: {p['linha']} !important;
+    color: {p['ink']} !important;
+}}
+.stApp input, .stApp textarea, .stApp div[data-baseweb="select"] div {{
+    background-color: transparent !important;
+    color: {p['ink']} !important;
+    -webkit-text-fill-color: {p['ink']} !important;
+    caret-color: {MARCA};
+}}
 .stApp input::placeholder, .stApp textarea::placeholder {{
-    color: var(--muted) !important; -webkit-text-fill-color: var(--muted) !important; }}
-div[data-baseweb="input"], div[data-baseweb="base-input"], div[data-baseweb="textarea"],
-div[data-baseweb="select"] > div, .stApp [data-testid="stDateInput"] > div > div {{
-    background: var(--item) !important; border-color: var(--linha) !important; }}
+    color: {p['muted']} !important; -webkit-text-fill-color: {p['muted']} !important; }}
+/* preenchimento automático do Chrome sobrescreve o fundo — isto impede */
+.stApp input:-webkit-autofill, .stApp input:-webkit-autofill:focus {{
+    -webkit-box-shadow: 0 0 0 60px {p['item']} inset !important;
+    -webkit-text-fill-color: {p['ink']} !important; }}
+.stApp .stTextInput > div > div:focus-within, .stApp .stTextArea > div > div:focus-within,
+.stApp div[data-baseweb="input"]:focus-within {{ border-color: {MARCA} !important; }}
+/* aviso "Press Enter to submit form" */
+.stApp [data-testid="InputInstructions"] {{ color: {p['muted']} !important; }}
+/* olhinho da senha e ícones dos campos */
+.stApp [data-testid="stTextInput"] button, .stApp [data-baseweb="input"] svg {{
+    color: {p['muted']} !important; fill: {p['muted']} !important; }}
 
 /* botões */
 .stApp .stButton button, .stApp .stFormSubmitButton button,
@@ -636,6 +659,34 @@ def alertas(tarefas: list[dict], user: dict) -> None:
 # Telas
 # --------------------------------------------------------------------------- #
 
+def tela_primeiro_acesso() -> None:
+    """Aparece só enquanto a tabela de usuários estiver vazia."""
+    st.markdown("<br>", unsafe_allow_html=True)
+    _, meio, _ = st.columns([1, 1.4, 1])
+    with meio:
+        st.markdown("<div class='eyebrow'>Primeiro acesso</div>"
+                    "<div class='titulo-app'>Criar administrador</div>"
+                    "<div class='meta'>Este será o único usuário com acesso total. "
+                    "Depois, ele cadastra os demais.</div><br>", unsafe_allow_html=True)
+        with st.form("primeiro_acesso"):
+            nome = st.text_input("Nome completo", key="pa_nome")
+            login = st.text_input("Usuário (login)", key="pa_login")
+            email = st.text_input("E-mail", key="pa_email")
+            senha = st.text_input("Senha", type="password", key="pa_senha")
+            conf = st.text_input("Confirmar senha", type="password", key="pa_conf")
+            if st.form_submit_button("Criar administrador", type="primary", **LARG_FSB):
+                if not (nome.strip() and login.strip()):
+                    st.error("Preencha nome e usuário.")
+                elif len(senha) < 6:
+                    st.error("A senha precisa ter ao menos 6 caracteres.")
+                elif senha != conf:
+                    st.error("A confirmação não confere.")
+                else:
+                    criar_usuario(nome, login, email, senha, "admin")
+                    st.success("Administrador criado. Faça login para continuar.")
+                    rerun()
+
+
 def tela_login() -> None:
     st.markdown("<br>", unsafe_allow_html=True)
     _, meio, _ = st.columns([1, 1.2, 1])
@@ -681,41 +732,44 @@ def montar_colunas(tarefas: list[dict]) -> list[dict]:
     return colunas
 
 
-def barra_adicionar(user: dict) -> None:
-    """Botões '+' discretos, um por coluna; os campos só aparecem ao clicar."""
+def form_nova_tarefa_coluna(status: str, user: dict) -> None:
+    """Formulário que aparece só quando o + da coluna é clicado."""
     mapa = {u["nome"]: u["id"] for u in usuarios_ativos()}
-    larguras = [1] * len(STATUS_LIST) + [len(STATUS_LIST) * 2]
-    colunas = st.columns(larguras, gap="small")
-    for col, status in zip(colunas, STATUS_LIST):
-        with col:
-            abridor = (st.popover(f"＋ {status}")
-                       if hasattr(st, "popover") else st.expander(f"＋ {status}"))
-            with abridor:
-                with st.form(f"add_{status}", clear_on_submit=True):
-                    titulo = st.text_input("Atividade", key=f"add_tit_{status}")
-                    resp = st.multiselect("Responsáveis (@)", list(mapa),
-                                          key=f"add_resp_{status}")
-                    prazo = st.date_input("Prazo", value=hoje() + timedelta(days=7),
-                                          key=f"add_prazo_{status}", **FMT_DATA)
-                    fim_em = None
-                    if status == "Realizado":
-                        fim_em = st.date_input("Concluída em", value=hoje(),
-                                               key=f"add_fim_{status}", **FMT_DATA)
-                    if st.form_submit_button("Criar", type="primary", **LARG_FSB):
-                        if not titulo.strip():
-                            st.error("Informe a atividade.")
-                        elif not resp:
-                            st.error("Marque ao menos um responsável.")
-                        else:
-                            criar_tarefa(
-                                titulo, "", user["id"], hoje(), prazo,
-                                [mapa[n] for n in resp], status,
-                                datetime.combine(fim_em, datetime.min.time()) if fim_em else None)
-                            rerun()
+    with caixa():
+        st.markdown(f"<b>Nova tarefa em {status}</b>", unsafe_allow_html=True)
+        with st.form(f"add_{status}", clear_on_submit=True):
+            c1, c2, c3 = st.columns([3, 2, 1.4])
+            titulo = c1.text_input("Atividade", key=f"add_tit_{status}")
+            resp = c2.multiselect("Responsáveis (@)", list(mapa), key=f"add_resp_{status}")
+            prazo = c3.date_input("Prazo", value=hoje() + timedelta(days=7),
+                                  key=f"add_prazo_{status}", **FMT_DATA)
+            fim_em = None
+            if status == "Realizado":
+                fim_em = c3.date_input("Concluída em", value=hoje(),
+                                       key=f"add_fim_{status}", **FMT_DATA)
+            b1, b2, _ = st.columns([1, 1, 4])
+            criar = b1.form_submit_button("Criar", type="primary", **LARG_FSB)
+            cancelar = b2.form_submit_button("Cancelar", **LARG_FSB)
+            if cancelar:
+                st.session_state.nova_em = None
+                rerun()
+            if criar:
+                if not titulo.strip():
+                    st.error("Informe a atividade.")
+                elif not resp:
+                    st.error("Marque ao menos um responsável.")
+                else:
+                    criar_tarefa(
+                        titulo, "", user["id"], hoje(), prazo,
+                        [mapa[n] for n in resp], status,
+                        datetime.combine(fim_em, datetime.min.time()) if fim_em else None)
+                    st.session_state.nova_em = None
+                    rerun()
 
 
 def aba_kanban(tarefas: list[dict], user: dict) -> None:
-    barra_adicionar(user)
+    if st.session_state.get("nova_em"):
+        form_nova_tarefa_coluna(st.session_state.nova_em, user)
 
     tema = TEMAS[st.session_state.tema]
     evento = quadro_kanban(montar_colunas(tarefas),
@@ -723,7 +777,10 @@ def aba_kanban(tarefas: list[dict], user: dict) -> None:
 
     if evento and evento.get("n") != st.session_state.get("ultimo_evento"):
         st.session_state.ultimo_evento = evento["n"]
-        alvo = next((t for t in tarefas if t["id"] == evento["id"]), None)
+        if evento["acao"] == "novo":
+            st.session_state.nova_em = evento["coluna"]
+            rerun()
+        alvo = next((t for t in tarefas if t["id"] == evento.get("id")), None)
         if alvo:
             if evento["acao"] == "mover" and evento["para"] != alvo["status"]:
                 alterar_status(alvo, evento["para"], user)
@@ -1068,21 +1125,6 @@ def tela_detalhe(tid: int, user: dict) -> None:
 # Aplicação
 # --------------------------------------------------------------------------- #
 
-def senha_admin_inicial() -> str:
-    """Senha do primeiro admin: vem de secrets [admin] senha, ou da env ADMIN_SENHA."""
-    try:
-        if "admin" in st.secrets and "senha" in st.secrets["admin"]:
-            return str(st.secrets["admin"]["senha"])
-    except Exception:
-        pass
-    return os.getenv("ADMIN_SENHA", "trocar-esta-senha")
-
-
-def semear_admin() -> None:
-    """Roda uma única vez, quando o banco ainda não tem nenhum usuário."""
-    criar_usuario("Administrador", "admin", "", senha_admin_inicial(), "admin")
-
-
 def menu_navegacao(user: dict, tarefas: list[dict]) -> tuple[str, list[dict]]:
     """Menu recolhido e filtros lado a lado, ambos compactos."""
     paginas = ["Kanban", "Calendário", "Lista", "Nova tarefa", "Prorrogações"]
@@ -1144,7 +1186,7 @@ def main() -> None:
     st.markdown(montar_css(st.session_state.tema), unsafe_allow_html=True)
 
     try:
-        init_db(semear_admin)
+        init_db()
     except ErroBanco as erro:
         cfg = config_db()
         st.error("**Não foi possível conectar ao PostgreSQL.**")
@@ -1155,6 +1197,10 @@ def main() -> None:
         st.stop()
 
     # Retoma a sessão pelo token da URL (sobrevive ao F5).
+    if banco_vazio():
+        tela_primeiro_acesso()
+        return
+
     if "usuario" not in st.session_state:
         token = qp_ler("s")
         if token:
