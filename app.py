@@ -152,11 +152,11 @@ def montar_css(tema: str) -> str:
 .stApp {{ background: var(--fundo); }}
 
 /* topo do Streamlit: sem barra, sem borda, sem sobra de espaço */
-header[data-testid="stHeader"] {{ background: transparent; height: 0; min-height: 0;
-                                  border: none; box-shadow: none; }}
-div[data-testid="stDecoration"] {{ display: none; }}
-div[data-testid="stToolbar"] {{ right: 8px; }}
-.block-container {{ padding-top: 1.2rem !important; }}
+header[data-testid="stHeader"], div[data-testid="stDecoration"],
+div[data-testid="stStatusWidget"] {{ display: none !important; }}
+.block-container, [data-testid="stAppViewBlockContainer"] {{
+    padding-top: .8rem !important; padding-bottom: .6rem !important; }}
+[data-testid="stVerticalBlock"] {{ gap: .55rem; }}
 div[data-testid="stExpander"] details {{ border-color: var(--linha) !important;
                                          background: var(--painel) !important; }}
 
@@ -615,16 +615,44 @@ def form_novo_card(status: str, user: dict) -> None:
                     rerun()
 
 
-def cabecalho(user: dict, tarefas: list[dict]) -> None:
-    esq, meio, dir_ = st.columns([3, 1.4, 0.7])
-    with esq:
+def cabecalho(user: dict, paginas: list[str]) -> str:
+    """Uma linha só: título à esquerda, menu, filtros e sair à direita."""
+    atual = st.session_state.get("pagina", "Kanban")
+    if atual not in paginas:
+        atual = "Kanban"
+
+    titulo, menu_c, filtro_c, sair_c = st.columns([5, 1.25, 1.15, 0.75])
+
+    with titulo:
         st.markdown("<div class='eyebrow'>Plano de ação</div>"
                     "<div class='titulo-app'>Gestor de Tarefas</div>", unsafe_allow_html=True)
-    with meio:
-        papel = "Administrador" if user["papel"] == "admin" else "Usuário"
-        st.markdown(f"<div class='quem-sou'><b>{user['nome']}</b><br>"
-                    f"@{user['usuario']} · {papel}</div>", unsafe_allow_html=True)
-    with dir_:
+
+    with menu_c:
+        if hasattr(st, "popover"):
+            with st.popover(f"☰  {atual}", **LARG_BTN):
+                for p in paginas:
+                    if st.button(p, key=f"nav_{p}", **LARG_BTN):
+                        st.session_state.pagina = p
+                        rerun()
+                st.divider()
+                claro = st.session_state.tema == "claro"
+                if st.button("Tema escuro" if claro else "Tema claro",
+                             key="nav_tema", **LARG_BTN):
+                    st.session_state.tema = "escuro" if claro else "claro"
+                    rerun()
+                st.markdown(f"<div class='meta'>{user['nome']} · "
+                            f"{'Administrador' if user['papel'] == 'admin' else 'Usuário'}</div>",
+                            unsafe_allow_html=True)
+        else:
+            escolha = st.selectbox("Menu", paginas, index=paginas.index(atual),
+                                   key="nav_sel", label_visibility="collapsed")
+            if escolha != atual:
+                st.session_state.pagina = escolha
+                rerun()
+
+    st.session_state.filtro_slot = filtro_c
+
+    with sair_c:
         st.markdown("<div class='btn-sair'>", unsafe_allow_html=True)
         if st.button("Sair", key="sair"):
             encerrar_sessao(st.session_state.get("token"))
@@ -633,19 +661,7 @@ def cabecalho(user: dict, tarefas: list[dict]) -> None:
             rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-    total = len(tarefas)
-    feitas = len([t for t in tarefas if t["status"] == "Realizado"])
-    pct = int(feitas / total * 100) if total else 0
-    pontos = " ".join(
-        f"<span class='dot' style='background:{CORES[s]}'></span> "
-        f"<span class='meta' style='display:inline;margin-right:16px'>"
-        f"{len([t for t in tarefas if t['status'] == s])} {s.lower()}</span>"
-        for s in STATUS_LIST)
-    e2, d2 = st.columns([3, 1.2])
-    e2.markdown(f"<div style='padding-top:4px'>{pontos}</div>", unsafe_allow_html=True)
-    d2.markdown(f"<div class='progresso'>{feitas} de {total} concluídas</div>"
-                f"<div class='barra'><i style='width:{pct}%'></i></div>", unsafe_allow_html=True)
-    st.write("")
+    return atual
 
 
 def alertas(tarefas: list[dict], user: dict) -> None:
@@ -727,14 +743,15 @@ def montar_colunas(tarefas: list[dict]) -> list[dict]:
             situacao, cor_prazo = situacao_prazo(t)
             acento = CORES["Atrasado"] if atrasada else CORES[status]
             resp = t["responsaveis"] or "sem responsável"
+            nomes = [n.strip().split(" ")[0] for n in resp.split(",")]
+            pessoas = "@" + nomes[0] + (f" +{len(nomes) - 1}" if len(nomes) > 1 else "")
             cards.append({
                 "id": t["id"],
-                "titulo": f"#{t['id']} &nbsp;{t['titulo']}",
-                "selo": "Atrasada" if atrasada else status,
+                "titulo": t["titulo"],
+                "atrasada": atrasada,
                 "acento": acento,
-                "pessoas": " ".join(f"@{n.strip()}" for n in resp.split(",")),
-                "periodo": f"{fmt_data(t['data_inicio'])} → {fmt_data(t['prazo_atual'])}",
-                "situacao": situacao,
+                "pessoas": pessoas if t["responsaveis"] else "sem responsável",
+                "prazo": t["prazo_atual"].strftime("%d/%m"),
                 "cor_prazo": cor_prazo,
                 "prorrogacao": bool(t["prorrog_pendentes"]),
             })
@@ -1163,57 +1180,27 @@ def tela_detalhe(tid: int, user: dict) -> None:
 # Aplicação
 # --------------------------------------------------------------------------- #
 
-def menu_navegacao(user: dict, tarefas: list[dict]) -> tuple[str, list[dict]]:
-    """Menu recolhido e filtros lado a lado, ambos compactos."""
-    paginas = ["Kanban", "Calendário", "Lista", "Nova tarefa", "Prorrogações"]
-    if user["papel"] == "admin":
-        paginas.append("Usuários")
-    paginas.append("Minha conta")
+def aplicar_filtros(tarefas: list[dict], pagina: str) -> list[dict]:
+    """Filtros dentro de um painel suspenso, ao lado do menu."""
+    if pagina not in ("Kanban", "Calendário", "Lista"):
+        return tarefas
 
-    atual = st.session_state.get("pagina", "Kanban")
-    if atual not in paginas:
-        atual = "Kanban"
+    with st.session_state.filtro_slot:
+        abridor = (st.popover("⚲  Filtros", **LARG_BTN)
+                   if hasattr(st, "popover") else st.expander("Filtros"))
+        with abridor:
+            status_sel = st.multiselect("Status", STATUS_LIST, default=STATUS_LIST,
+                                        key="f_status")
+            so_atrasadas = st.checkbox("Somente atrasadas", key="f_atrasadas")
+            busca = st.text_input("Buscar no título", key="f_busca")
 
-    menu_col, filtro_col, _ = st.columns([1.1, 1.1, 5])
-
-    with menu_col:
-        if hasattr(st, "popover"):
-            with st.popover(f"☰  {atual}", **LARG_BTN):
-                for p in paginas:
-                    if st.button(p, key=f"nav_{p}", **LARG_BTN):
-                        st.session_state.pagina = p
-                        rerun()
-                st.divider()
-                claro = st.session_state.tema == "claro"
-                if st.button("Tema escuro" if claro else "Tema claro",
-                             key="nav_tema", **LARG_BTN):
-                    st.session_state.tema = "escuro" if claro else "claro"
-                    rerun()
-        else:
-            escolha = st.selectbox("Menu", paginas, index=paginas.index(atual),
-                                   key="nav_sel", label_visibility="collapsed")
-            if escolha != atual:
-                st.session_state.pagina = escolha
-                rerun()
-
-    filtradas = tarefas
-    with filtro_col:
-        if atual in ("Kanban", "Calendário", "Lista"):
-            abridor = (st.popover("⚲  Filtros", **LARG_BTN)
-                       if hasattr(st, "popover") else st.expander("Filtros"))
-            with abridor:
-                status_sel = st.multiselect("Status", STATUS_LIST, default=STATUS_LIST,
-                                            key="f_status")
-                so_atrasadas = st.checkbox("Somente atrasadas", key="f_atrasadas")
-                busca = st.text_input("Buscar no título", key="f_busca")
-            filtradas = [t for t in tarefas if t["status"] in status_sel]
-            if so_atrasadas:
-                filtradas = [t for t in filtradas if eh_atrasada(t)]
-            if busca.strip():
-                termo = busca.strip().lower()
-                filtradas = [t for t in filtradas if termo in t["titulo"].lower()]
-
-    return atual, filtradas
+    saida = [t for t in tarefas if t["status"] in status_sel]
+    if so_atrasadas:
+        saida = [t for t in saida if eh_atrasada(t)]
+    if busca.strip():
+        termo = busca.strip().lower()
+        saida = [t for t in saida if termo in t["titulo"].lower()]
+    return saida
 
 
 def main() -> None:
@@ -1267,9 +1254,14 @@ def main() -> None:
         tela_detalhe(st.session_state.tarefa_sel, user)
         return
 
+    paginas = ["Kanban", "Calendário", "Lista", "Nova tarefa", "Prorrogações"]
+    if user["papel"] == "admin":
+        paginas.append("Usuários")
+    paginas.append("Minha conta")
+
     tarefas = listar_tarefas(user)
-    cabecalho(user, tarefas)
-    pagina, filtradas = menu_navegacao(user, tarefas)
+    pagina = cabecalho(user, paginas)
+    filtradas = aplicar_filtros(tarefas, pagina)
     alertas(tarefas, user)
 
     if pagina == "Kanban":
