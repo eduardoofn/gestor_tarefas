@@ -615,13 +615,37 @@ def form_novo_card(status: str, user: dict) -> None:
                     rerun()
 
 
+def form_rapido(user: dict) -> None:
+    """Criação de tarefa em painel suspenso — abre e fecha sem recarregar a página."""
+    mapa = {u["nome"]: u["id"] for u in usuarios_ativos()}
+    with st.form("add_rapido", clear_on_submit=True):
+        titulo = st.text_input("Atividade", key="qa_tit")
+        coluna = st.selectbox("Coluna", STATUS_LIST, index=1, key="qa_col")
+        resp = st.multiselect("Responsáveis (@)", list(mapa), key="qa_resp")
+        prazo = st.date_input("Prazo", value=hoje() + timedelta(days=7),
+                              key="qa_prazo", **FMT_DATA)
+        fim_em = st.date_input("Concluída em (só vale para Realizado)", value=hoje(),
+                               key="qa_fim", **FMT_DATA)
+        if st.form_submit_button("Criar", type="primary", **LARG_FSB):
+            if not titulo.strip():
+                st.error("Informe a atividade.")
+            elif not resp:
+                st.error("Marque ao menos um responsável.")
+            else:
+                criar_tarefa(
+                    titulo, "", user["id"], hoje(), prazo, [mapa[n] for n in resp], coluna,
+                    datetime.combine(fim_em, datetime.min.time())
+                    if coluna == "Realizado" else None)
+                rerun()
+
+
 def cabecalho(user: dict, paginas: list[str]) -> str:
-    """Uma linha só: título à esquerda, menu, filtros e sair à direita."""
+    """Título à esquerda; menu, novo, filtros e sair compactos à direita."""
     atual = st.session_state.get("pagina", "Kanban")
     if atual not in paginas:
         atual = "Kanban"
 
-    titulo, menu_c, filtro_c, sair_c = st.columns([5, 1.25, 1.15, 0.75])
+    titulo, menu_c, novo_c, filtro_c, sair_c = st.columns([9, 1, 1, 1, 0.75])
 
     with titulo:
         st.markdown("<div class='eyebrow'>Plano de ação</div>"
@@ -629,9 +653,12 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
 
     with menu_c:
         if hasattr(st, "popover"):
-            with st.popover(f"☰  {atual}", **LARG_BTN):
+            with st.popover("☰", **LARG_BTN):
+                st.markdown(f"<div class='meta'>{user['nome']} · "
+                            f"{'Administrador' if user['papel'] == 'admin' else 'Usuário'}</div>",
+                            unsafe_allow_html=True)
                 for p in paginas:
-                    if st.button(p, key=f"nav_{p}", **LARG_BTN):
+                    if st.button(("• " if p == atual else "") + p, key=f"nav_{p}", **LARG_BTN):
                         st.session_state.pagina = p
                         rerun()
                 st.divider()
@@ -640,15 +667,20 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                              key="nav_tema", **LARG_BTN):
                     st.session_state.tema = "escuro" if claro else "claro"
                     rerun()
-                st.markdown(f"<div class='meta'>{user['nome']} · "
-                            f"{'Administrador' if user['papel'] == 'admin' else 'Usuário'}</div>",
-                            unsafe_allow_html=True)
         else:
             escolha = st.selectbox("Menu", paginas, index=paginas.index(atual),
                                    key="nav_sel", label_visibility="collapsed")
             if escolha != atual:
                 st.session_state.pagina = escolha
                 rerun()
+
+    with novo_c:
+        if hasattr(st, "popover"):
+            with st.popover("＋", **LARG_BTN):
+                form_rapido(user)
+        else:
+            with st.expander("＋"):
+                form_rapido(user)
 
     st.session_state.filtro_slot = filtro_c
 
@@ -801,18 +833,12 @@ def form_nova_tarefa_coluna(status: str, user: dict, prazo_sugerido=None) -> Non
 
 
 def aba_kanban(tarefas: list[dict], user: dict) -> None:
-    if st.session_state.get("nova_em"):
-        form_nova_tarefa_coluna(st.session_state.nova_em, user)
-
     tema = TEMAS[st.session_state.tema]
     evento = quadro_kanban(montar_colunas(tarefas),
                            {**tema, "marca": MARCA}, key="quadro_kanban")
 
     if evento and evento.get("n") != st.session_state.get("ultimo_evento"):
         st.session_state.ultimo_evento = evento["n"]
-        if evento["acao"] == "novo":
-            st.session_state.nova_em = evento["coluna"]
-            rerun()
         alvo = next((t for t in tarefas if t["id"] == evento.get("id")), None)
         if alvo:
             if evento["acao"] == "mover" and evento["para"] != alvo["status"]:
@@ -1186,7 +1212,7 @@ def aplicar_filtros(tarefas: list[dict], pagina: str) -> list[dict]:
         return tarefas
 
     with st.session_state.filtro_slot:
-        abridor = (st.popover("⚲  Filtros", **LARG_BTN)
+        abridor = (st.popover("⚲", **LARG_BTN)
                    if hasattr(st, "popover") else st.expander("Filtros"))
         with abridor:
             status_sel = st.multiselect("Status", STATUS_LIST, default=STATUS_LIST,

@@ -89,17 +89,6 @@ function desenhar(colunas, tema) {
       `<span class="bolinha" style="background:${col.cor}"></span>${col.nome}` +
       `<span class="contador" style="background:${T.item};border:1px solid ${T.linha};color:${T.texto}">${col.cards.length}</span>`;
 
-    const mais = document.createElement("div");
-    mais.className = "mais";
-    mais.title = "Adicionar em " + col.nome;
-    mais.textContent = "+";
-    mais.style.background = col.cor + "22";
-    mais.style.border = "1px solid " + col.cor + "66";
-    mais.style.color = col.cor;
-    mais.addEventListener("click", () =>
-      enviar({ acao: "novo", coluna: col.nome, n: Date.now() }));
-    topo.appendChild(mais);
-
     c.appendChild(topo);
 
     const corpo = document.createElement("div");
@@ -126,6 +115,22 @@ function desenhar(colunas, tema) {
       ev.preventDefault();
       corpo.classList.remove("alvo");
       if (arrastado === null) return;
+
+      // Move na hora, antes de avisar o Python: o usuário não espera o servidor.
+      const el = document.querySelector(`.cartao[data-id="${arrastado}"]`);
+      if (el && el.parentElement !== corpo) {
+        const vazia = corpo.querySelector(".vazia");
+        if (vazia) vazia.remove();
+        const alvo = ev.target.closest(".cartao");
+        if (alvo && alvo !== el) {
+          const meio = alvo.getBoundingClientRect().top + alvo.offsetHeight / 2;
+          corpo.insertBefore(el, ev.clientY < meio ? alvo : alvo.nextSibling);
+        } else {
+          corpo.appendChild(el);
+        }
+        atualizarContadores();
+      }
+
       enviar({ acao: "mover", id: arrastado, para: col.nome, n: Date.now() });
       arrastado = null;
     });
@@ -143,6 +148,14 @@ function desenhar(colunas, tema) {
   raiz.appendChild(dica);
 
   altura();
+}
+
+function atualizarContadores() {
+  document.querySelectorAll(".coluna").forEach(col => {
+    const n = col.querySelectorAll(".cartao").length;
+    const c = col.querySelector(".contador");
+    if (c) c.textContent = n;
+  });
 }
 
 function montarCartao(card) {
