@@ -102,6 +102,11 @@ def consultar_um(sql: str, params: tuple = ()) -> dict | None:
     return linhas[0] if linhas else None
 
 
+def binario(dados: bytes):
+    """Empacota bytes para a coluna BYTEA (anexos)."""
+    return psycopg2.Binary(dados)
+
+
 # --------------------------------------------------------------------------- #
 # Schema
 # --------------------------------------------------------------------------- #
@@ -183,13 +188,59 @@ DDL = [
     """,
     "CREATE INDEX IF NOT EXISTS ix_prorrog_situacao ON prorrogacoes (situacao)",
     "CREATE INDEX IF NOT EXISTS ix_sessoes_usuario ON sessoes (usuario_id)",
+    """
+    CREATE TABLE IF NOT EXISTS anexos (
+        id         SERIAL PRIMARY KEY,
+        tarefa_id  INTEGER   NOT NULL REFERENCES tarefas(id) ON DELETE CASCADE,
+        usuario_id INTEGER   REFERENCES usuarios(id),
+        nome       TEXT      NOT NULL,
+        tipo       TEXT,
+        tamanho    INTEGER   NOT NULL,
+        conteudo   BYTEA     NOT NULL,
+        criado_em  TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS notificacoes (
+        id         SERIAL PRIMARY KEY,
+        usuario_id INTEGER   NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+        tarefa_id  INTEGER   REFERENCES tarefas(id) ON DELETE CASCADE,
+        tipo       TEXT      NOT NULL,
+        texto      TEXT      NOT NULL,
+        lida       BOOLEAN   NOT NULL DEFAULT FALSE,
+        criado_em  TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_anexos_tarefa ON anexos (tarefa_id)",
+    "CREATE INDEX IF NOT EXISTS ix_notif_usuario ON notificacoes (usuario_id, lida, id)",
+    "CREATE INDEX IF NOT EXISTS ix_tarefas_criador ON tarefas (criador_id)",
+    # Sustenta os contadores dos banners, que rodam a cada reexecução da tela.
+    "CREATE INDEX IF NOT EXISTS ix_tarefas_aprovacao ON tarefas (status, aprovacao)",
 ]
 
-# Migrações aplicadas a bancos que já existiam antes da coluna Backlog.
+# Migrações aplicadas a bancos que já existiam antes das colunas novas.
+# ADD COLUMN IF NOT EXISTS é idempotente, então rodar toda vez não custa nada.
 MIGRACOES = [
     "ALTER TABLE tarefas DROP CONSTRAINT IF EXISTS tarefas_status_check",
     """ALTER TABLE tarefas ADD CONSTRAINT tarefas_status_check
        CHECK (status IN ('Backlog', 'Iniciado', 'Em andamento', 'Realizado'))""",
+
+    # --- trava de conclusão: só fecha depois do aceite de quem criou ---------
+    "ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS conclusao_texto TEXT",
+    "ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS conclusao_por INTEGER REFERENCES usuarios(id)",
+    "ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS conclusao_em TIMESTAMP",
+    "ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS aprovacao TEXT",
+    "ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS aprovado_por INTEGER REFERENCES usuarios(id)",
+    "ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS aprovado_em TIMESTAMP",
+    "ALTER TABLE tarefas ADD COLUMN IF NOT EXISTS aprovacao_obs TEXT",
+    "ALTER TABLE tarefas DROP CONSTRAINT IF EXISTS tarefas_aprovacao_check",
+    """ALTER TABLE tarefas ADD CONSTRAINT tarefas_aprovacao_check
+       CHECK (aprovacao IS NULL OR aprovacao IN ('Pendente', 'Aprovada', 'Recusada'))""",
+
+    # Tarefas que já estavam em Realizado antes da trava entram como aprovadas,
+    # senão o quadro antigo apareceria inteiro "aguardando aprovação".
+    """UPDATE tarefas SET aprovacao = 'Aprovada', aprovado_em = COALESCE(concluido_em, NOW())
+        WHERE status = 'Realizado' AND aprovacao IS NULL""",
 ]
 
 

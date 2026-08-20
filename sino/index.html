@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; height: 0; overflow: hidden; }
+</style>
+</head>
+<body>
+<script>
+/* ---------------------------------------------------------------------------
+   Sino: componente sem interface. Faz duas coisas.
+
+   1) Alerta sonoro. O Python manda um contador em `tocar`; quando ele muda,
+      um bipe curto é sintetizado na hora pela Web Audio API — assim não há
+      arquivo de áudio para hospedar. O navegador só libera áudio depois de
+      um clique do usuário, então o contexto é retomado no primeiro clique
+      (aqui dentro e, quando possível, também na página que nos hospeda).
+
+   2) Tique de atualização. Com `intervalo` > 0, devolve um valor novo a cada
+      N segundos — e devolver valor é o que faz o Streamlit reexecutar o app,
+      que então busca notificações novas. Com 0, fica quieto.
+--------------------------------------------------------------------------- */
+
+function enviar(valor) {
+  window.parent.postMessage({
+    isStreamlitMessage: true, type: "streamlit:setComponentValue",
+    value: valor, dataType: "json"
+  }, "*");
+}
+
+window.parent.postMessage({
+  isStreamlitMessage: true, type: "streamlit:setFrameHeight", height: 0
+}, "*");
+
+// ------------------------------------------------------------------ áudio
+let ctx = null;
+
+function contexto() {
+  if (!ctx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    ctx = new AC();
+  }
+  if (ctx.state === "suspended") ctx.resume().catch(() => {});
+  return ctx;
+}
+
+function nota(ac, hz, atraso, duracao) {
+  const osc = ac.createOscillator();
+  const vol = ac.createGain();
+  osc.type = "sine";
+  osc.frequency.value = hz;
+  // Envelope: sem a rampa, o corte seco vira um estalo.
+  vol.gain.setValueAtTime(0.0001, ac.currentTime + atraso);
+  vol.gain.exponentialRampToValueAtTime(0.28, ac.currentTime + atraso + 0.02);
+  vol.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + atraso + duracao);
+  osc.connect(vol).connect(ac.destination);
+  osc.start(ac.currentTime + atraso);
+  osc.stop(ac.currentTime + atraso + duracao + 0.02);
+}
+
+function bipar() {
+  try {
+    const ac = contexto();
+    if (!ac) return;
+    nota(ac, 880, 0, 0.13);      // dois toques curtos, tipo aviso de mensagem
+    nota(ac, 1174, 0.15, 0.18);
+  } catch (e) { /* navegador bloqueou: silêncio, e a notificação visual fica */ }
+}
+
+// Destrava o áudio na primeira interação do usuário.
+["click", "keydown", "touchstart"].forEach(ev => {
+  document.addEventListener(ev, () => contexto(), { once: false });
+  try { window.parent.document.addEventListener(ev, () => contexto()); } catch (e) {}
+});
+
+// ------------------------------------------------- calendário em português
+/* O seletor de data do Streamlit vem em inglês e não há parâmetro de idioma
+   na API. Como este componente é servido pela mesma origem do app, dá para
+   alcançar o documento de cima e trocar os rótulos assim que o calendário
+   aparece. Se o navegador barrar o acesso, o try/catch engole e fica só o
+   formato dd/mm/aaaa, que é o que mais importa. */
+const MESES_PT = {
+  January: "Janeiro", February: "Fevereiro", March: "Março", April: "Abril",
+  May: "Maio", June: "Junho", July: "Julho", August: "Agosto",
+  September: "Setembro", October: "Outubro", November: "Novembro", December: "Dezembro"
+};
+const DIAS_PT = {
+  Sunday: "Domingo", Monday: "Segunda", Tuesday: "Terça", Wednesday: "Quarta",
+  Thursday: "Quinta", Friday: "Sexta", Saturday: "Sábado",
+  Sun: "Dom", Mon: "Seg", Tue: "Ter", Wed: "Qua", Thu: "Qui", Fri: "Sex", Sat: "Sáb",
+  Su: "Dom", Mo: "Seg", Tu: "Ter", We: "Qua", Th: "Qui", Fr: "Sex", Sa: "Sáb"
+};
+
+function traduzirTexto(txt) {
+  let saida = txt;
+  for (const [en, pt] of Object.entries(MESES_PT)) {
+    saida = saida.replace(new RegExp("\\b" + en + "\\b", "g"), pt);
+  }
+  const limpo = saida.trim();
+  if (DIAS_PT[limpo]) saida = saida.replace(limpo, DIAS_PT[limpo]);
+  return saida;
+}
+
+function traduzirCalendario(raiz) {
+  const passeio = raiz.ownerDocument.createTreeWalker(raiz, NodeFilter.SHOW_TEXT);
+  const pendentes = [];
+  while (passeio.nextNode()) pendentes.push(passeio.currentNode);
+  // Só escreve quando muda de fato — senão o observador se realimenta.
+  pendentes.forEach(no => {
+    const novo = traduzirTexto(no.nodeValue);
+    if (novo !== no.nodeValue) no.nodeValue = novo;
+  });
+}
+
+try {
+  const doc = window.parent.document;
+  const observador = new MutationObserver(() => {
+    doc.querySelectorAll('[data-baseweb="calendar"], [data-baseweb="datepicker"]')
+       .forEach(traduzirCalendario);
+  });
+  observador.observe(doc.body, { childList: true, subtree: true });
+} catch (e) { /* origem diferente: segue em inglês, sem quebrar nada */ }
+
+// ------------------------------------------------------------------ ciclo
+/* O contador do último bipe fica no sessionStorage, não numa variável.
+
+   Motivo: o Streamlit recria este iframe quando o componente muda de lugar na
+   página (trocar de aba, abrir o detalhe, voltar). Com a variável em memória,
+   toda remontagem "esquecia" o número, tratava o valor recebido como primeira
+   carga e engolia o bipe — que era justamente o sintoma de som que nunca sai.
+   O sessionStorage sobrevive à remontagem e morre junto com a aba. */
+const CHAVE = "sino_ultimo_tocar";
+let timer = null;
+
+function jaTocou(n) {
+  try { return sessionStorage.getItem(CHAVE) === String(n); } catch (e) { return false; }
+}
+function anotar(n) {
+  try { sessionStorage.setItem(CHAVE, String(n)); } catch (e) {}
+}
+
+window.addEventListener("message", ev => {
+  if (!ev.data || ev.data.type !== "streamlit:render") return;
+  const args = ev.data.args || {};
+  const tocar = args.tocar || 0;
+  const intervalo = args.intervalo || 0;
+
+  if (tocar > 0 && !jaTocou(tocar)) { anotar(tocar); bipar(); }
+  else if (tocar === 0) anotar(0);
+
+  if (timer) clearTimeout(timer);
+  if (intervalo > 0) {
+    timer = setTimeout(() => {
+      // Aba escondida não precisa de reexecução: economiza servidor e bateria.
+      let visivel = true;
+      try { visivel = window.parent.document.visibilityState !== "hidden"; } catch (e) {}
+      if (visivel) enviar({ tique: Date.now() });
+      else timer = setTimeout(() => enviar({ tique: Date.now() }), intervalo * 1000);
+    }, intervalo * 1000);
+  }
+});
+
+window.parent.postMessage({
+  isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1
+}, "*");
+</script>
+</body>
+</html>
