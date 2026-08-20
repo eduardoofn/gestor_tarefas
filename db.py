@@ -78,9 +78,6 @@ def cursor(commit: bool = False):
 # --------------------------------------------------------------------------- #
 # Operações
 # --------------------------------------------------------------------------- #
-def banco_vazio() -> bool:
-    """True quando ainda não existe nenhum usuário cadastrado."""
-    return consultar_um("SELECT id FROM usuarios LIMIT 1") is None
 
 def executar(sql: str, params: tuple = ()) -> None:
     with cursor(commit=True) as cur:

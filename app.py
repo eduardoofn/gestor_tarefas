@@ -92,7 +92,7 @@ MAX_CARTOES_COLUNA = 40       # teto de desenho por coluna; o contador mostra o 
 
 # Carimbo visível no menu da conta. Serve para responder de olho na tela a
 # pergunta "os arquivos novos entraram mesmo?" sem abrir editor nenhum.
-VERSAO = "v5 · 19/08/2026"
+VERSAO = "v9 · 20/08/2026"
 # Cada tique é uma reexecução inteira do app. Aumente se o quadro crescer
 # muito; desligue de vez pelo menu da conta.
 SEG_ATUALIZACAO = 90          # tique do sino nas telas de leitura
@@ -241,6 +241,39 @@ div[data-testid="stPopover"] button {{
     border: 1px solid var(--linha) !important; font-size: 12.5px !important;
     padding: 2px 10px !important; min-height: 30px !important;
     white-space: nowrap !important; }}
+/* Espaçamento geral mais curto: o Streamlit separa cada bloco vertical com
+   1rem, e na tela da tarefa — descrição, conclusão, anexos, gerenciar,
+   histórico — isso somava uma rolagem inteira de ar. */
+[data-testid="stVerticalBlock"] {{ gap: .42rem !important; }}
+[data-testid="stHorizontalBlock"] {{ gap: .5rem !important; }}
+.stApp .stMarkdown p {{ margin-bottom: .18rem !important; }}
+.stApp hr {{ margin: .35rem 0 !important; }}
+.stApp h5 {{ margin: .1rem 0 .25rem 0 !important; font-size: 14px !important; }}
+[data-testid="stExpander"] details {{ margin-bottom: .1rem !important; }}
+[data-testid="stExpander"] summary {{ padding: .25rem .6rem !important;
+    font-size: 12.5px !important; }}
+.stApp .stTextArea textarea, .stApp .stTextInput input {{ font-size: 13px !important; }}
+.stApp [data-testid="stWidgetLabel"] p {{ font-size: 12px !important;
+    margin-bottom: .1rem !important; }}
+/* Nada de mexer no padding do container por data-testid: o seletor muda de
+   nome entre versões do Streamlit (foi o que já nos mordeu no quadro). O
+   aperto vem do gap acima, que é propriedade estável. */
+
+/* Tira de alertas: uma linha, sem o padding gordo dos banners nativos. */
+.tira-alertas {{ display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 8px 0; }}
+.alerta-chip {{ font-size: 11.5px; font-weight: 700; padding: 2px 9px;
+                border-radius: 999px; border: 1px solid; line-height: 1.5;
+                white-space: nowrap; }}
+
+/* Sino enxuto: mais notificação visível na mesma altura. */
+div[data-testid="stPopover"] .stButton button {{
+    min-height: 22px !important; padding: 0 5px !important;
+    font-size: 12px !important; line-height: 1 !important; }}
+div[data-testid="stPopover"] .stButton button p {{ margin: 0 !important; }}
+.notif-txt {{ font-size: 12px; line-height: 1.35; }}
+.notif-hora {{ font-size: 10px; opacity: .6; }}
+.notif-linha {{ border-top: 1px solid var(--linha); margin: 5px 0 4px 0; }}
+
 /* Sem isto, botão em coluna estreita quebra a palavra ("Canc / elar"). */
 .stApp .stButton button p, .stApp .stFormSubmitButton button p {{
     white-space: nowrap !important; overflow: hidden; text-overflow: ellipsis; }}
@@ -524,9 +557,10 @@ def painel_usuario(user: dict) -> dict:
     """
     if user["papel"] == "admin":
         filtro_prorrog = "SELECT COUNT(*) FROM prorrogacoes WHERE situacao = 'Pendente'"
-        filtro_conclu = ("SELECT COUNT(*) FROM tarefas "
-                         "WHERE status = 'Realizado' AND aprovacao = 'Pendente'")
-        params = (user["id"], user["id"], user["id"])
+        filtro_conclu = ("""SELECT COUNT(*) FROM tarefas
+                             WHERE status = 'Realizado' AND aprovacao = 'Pendente'
+                               AND criador_id = %s""")
+        params = tuple([user["id"]] * 5)
     else:
         filtro_prorrog = ("""SELECT COUNT(*) FROM prorrogacoes p
                                JOIN tarefas t ON t.id = p.tarefa_id
@@ -535,15 +569,19 @@ def painel_usuario(user: dict) -> dict:
         filtro_conclu = ("""SELECT COUNT(*) FROM tarefas
                              WHERE status = 'Realizado' AND aprovacao = 'Pendente'
                                AND criador_id = %s""")
-        params = (user["id"], user["id"], user["id"], user["id"], user["id"], user["id"])
+        params = tuple([user["id"]] * 7)
 
     linha = consultar_um(f"""
-        SELECT (SELECT COUNT(*) FROM notificacoes
+        SELECT (SELECT ROW_TO_JSON(x) FROM (SELECT * FROM usuarios
+                 WHERE id = %s AND ativo) x)                    AS usuario,
+               (SELECT COUNT(*) FROM notificacoes
                  WHERE usuario_id = %s AND NOT lida)            AS nao_lidas,
                (SELECT COALESCE(MAX(id), 0) FROM notificacoes
                  WHERE usuario_id = %s AND NOT lida)            AS maior,
                ({filtro_prorrog})                               AS prorrogacoes,
                ({filtro_conclu})                                AS conclusoes,
+               -- 12 cabem agora que cada aviso é uma linha; vêm na mesma
+               -- consulta, então mostrar mais não custa ida extra ao banco.
                -- A data sai formatada pelo próprio Postgres: dentro do JSON
                -- ela viraria texto ISO, e aí o fmt_hora do Python quebraria
                -- ao tentar strftime numa string.
@@ -551,11 +589,11 @@ def painel_usuario(user: dict) -> dict:
                     SELECT n.id, n.texto, n.lida, n.tarefa_id,
                            TO_CHAR(n.criado_em, 'DD/MM/YYYY HH24:MI') AS quando
                       FROM notificacoes n
-                     WHERE n.usuario_id = %s ORDER BY n.id DESC LIMIT 6
+                     WHERE n.usuario_id = %s ORDER BY n.id DESC LIMIT 12
                ) f)                                             AS feed
     """, params)
-    return linha or {"nao_lidas": 0, "maior": 0, "prorrogacoes": 0,
-                     "conclusoes": 0, "feed": []}
+    return linha or {"usuario": None, "nao_lidas": 0, "maior": 0,
+                     "prorrogacoes": 0, "conclusoes": 0, "feed": []}
 
 
 def resumo_notificacoes(user: dict) -> dict:
@@ -730,8 +768,15 @@ def pode_editar(t: dict, user: dict) -> bool:
 
 
 def pode_aprovar(t: dict, user: dict) -> bool:
-    """Aceitar ou recusar a conclusão: o solicitante (criador) ou um admin."""
-    return user["papel"] == "admin" or t["criador_id"] == user["id"]
+    """Aceitar ou recusar a conclusão: SÓ quem pediu a tarefa.
+
+    Admin não entra nesta: ver tudo e administrar usuários é uma coisa,
+    decidir se a entrega de outra pessoa serve é outra — quem sabe o que
+    pediu é quem pediu. Efeito colateral a conhecer: se o criador for
+    desativado, as conclusões dele ficam sem quem aceite; nesse caso, passe
+    a tarefa para outro criador editando-a, ou reative o usuário.
+    """
+    return t["criador_id"] == user["id"]
 
 
 def registrar_abertura(tid: int, user: dict) -> None:
@@ -765,39 +810,31 @@ def alterar_status(t: dict, novo: str, user: dict) -> bool:
 # ----- conclusão com aceite do solicitante ---------------------------------- #
 
 def enviar_conclusao(t: dict, texto: str, user: dict) -> bool:
-    """O responsável finaliza com uma descrição; a tarefa fica Realizado, mas
-    só conta como concluída depois que o criador aceitar. Devolve True se já
-    saiu aprovada — e isso acontece só num caso: quem finaliza É o criador,
-    porque aí a análise já foi feita por quem tinha de fazer.
+    """Finalizar NUNCA fecha a tarefa. Sempre para em 'aguardando aprovação'.
 
-    Admin NÃO passa por cima disto: se ele é responsável por uma tarefa que
-    outra pessoa criou, a conclusão vai para a fila de quem pediu. Ser admin
-    dá o poder de decidir na fila, não o de pular a fila."""
-    auto = user["id"] == t["criador_id"]
+    Antes havia um atalho: se quem finalizava era o próprio criador, aprovava
+    sozinho — a análise já teria sido feita por quem tinha de fazer. Na prática
+    o atalho engolia a etapa justamente no caso mais comum, que é o criador
+    tocando as próprias tarefas, e a trava parecia não existir. Regra única
+    agora: toda conclusão passa pela análise de quem pediu, sem exceção — só
+    que, quando é o próprio criador, o botão de aceitar já aparece ali do lado.
+
+    Devolve sempre False (nada é aprovado neste passo); a assinatura fica para
+    não quebrar quem chama.
+    """
     agora = datetime.now()
     executar("""UPDATE tarefas
                    SET status = 'Realizado', conclusao_texto = %s, conclusao_por = %s,
-                       conclusao_em = %s, aprovacao = %s, aprovado_por = %s,
-                       aprovado_em = %s, concluido_em = %s, aprovacao_obs = NULL
+                       conclusao_em = %s, aprovacao = 'Pendente', aprovado_por = NULL,
+                       aprovado_em = NULL, concluido_em = NULL, aprovacao_obs = NULL
                  WHERE id = %s""",
-             (texto.strip(), user["id"], agora,
-              "Aprovada" if auto else "Pendente",
-              user["id"] if auto else None,
-              agora if auto else None,
-              agora if auto else None,
-              t["id"]))
-    registrar(t["id"], user["id"],
-              "Conclusão aprovada" if auto else "Conclusão enviada", texto.strip())
-    eco(f"“{t['titulo']}” " + ("concluída." if auto else
-                               f"enviada para aprovação de @{t['criador']}."), t["id"])
-    if auto:
-        notificar(envolvidos(t["id"], t["criador_id"]), t["id"], "concluida",
-                  f"“{t['titulo']}” foi concluída por @{user['nome']}", exceto=user["id"])
-    else:
-        notificar([t["criador_id"]], t["id"], "aprovar",
-                  f"@{user['nome']} finalizou “{t['titulo']}” e aguarda sua aprovação",
-                  exceto=user["id"])
-    return auto
+             (texto.strip(), user["id"], agora, t["id"]))
+    registrar(t["id"], user["id"], "Conclusão enviada", texto.strip())
+    eco(f"“{t['titulo']}” finalizada — aguardando a análise de @{t['criador']}.", t["id"])
+    notificar([t["criador_id"]], t["id"], "aprovar",
+              f"@{user['nome']} finalizou “{t['titulo']}” e aguarda sua aprovação",
+              exceto=user["id"])
+    return False
 
 
 def decidir_conclusao(t: dict, aprovar: bool, observacao: str, user: dict) -> None:
@@ -830,10 +867,6 @@ def decidir_conclusao(t: dict, aprovar: bool, observacao: str, user: dict) -> No
 def conclusoes_para_aprovar(user: dict) -> list[dict]:
     """Tarefas finalizadas que dependem da análise deste usuário."""
     base = SQL_TAREFA_BASE.format(sou_resp="")
-    if user["papel"] == "admin":
-        return consultar(base + """
-            WHERE t.status = 'Realizado' AND t.aprovacao = 'Pendente'
-            ORDER BY t.conclusao_em DESC""")
     return consultar(base + """
         WHERE t.status = 'Realizado' AND t.aprovacao = 'Pendente'
           AND t.criador_id = %s
@@ -916,8 +949,15 @@ def atualizar_tarefa(t: dict, titulo, descricao, inicio, novos_resp, user) -> No
         mudancas.append(f"Removido @{nome_usuario(uid)}")
 
     if mudancas or descricao.strip() != (t["descricao"] or ""):
-        registrar(t["id"], user["id"], "Tarefa editada",
-                  " | ".join(mudancas) or "Descrição atualizada")
+        resumo = " | ".join(mudancas) or "Descrição atualizada"
+        registrar(t["id"], user["id"], "Tarefa editada", resumo)
+        # Dizer O QUE mudou, não só "salvo": é o que confirma que pegou.
+        eco(f"Tarefa #{t['id']} atualizada — {resumo}", t["id"])
+        notificar(envolvidos(t["id"], t["criador_id"]), t["id"], "editada",
+                  f"@{user['nome']} alterou “{titulo.strip()}”: {resumo}",
+                  exceto=user["id"])
+    else:
+        st.session_state.aviso = ("Nada mudou — nenhum campo foi alterado.", "alerta")
 
 
 def excluir_tarefa(tid: int) -> None:
@@ -1123,32 +1163,44 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                 itens = st.session_state.get("painel", {}).get("feed") or []
                 if not itens:
                     st.caption("Nenhuma notificação por aqui.")
-                for n in itens:
+                # Texto e botões na MESMA linha, com um filete no lugar do
+                # st.divider (que tem margem larga). Cada aviso passou de três
+                # blocos empilhados para uma tira só — cabe o dobro na janela.
+                for i, n in enumerate(itens):
                     ponto = "🟢 " if not n["lida"] else ""
-                    linha, fechar = st.columns([6, 1])
                     quando = n.get("quando") or fmt_hora(n.get("criado_em"))
-                    linha.markdown(f"{ponto}{n['texto']}  \n"
-                                   f"<span class='meta'>{quando}</span>",
-                                   unsafe_allow_html=True)
-                    if fechar.button("✕", key=f"nx_{n['id']}", help="Fechar", **LARG_BTN):
-                        descartar_notificacao(user, n["id"])
-                        rerun()
-                    if n["tarefa_id"] and linha.button("Abrir tarefa", key=f"nt_{n['id']}",
-                                                       **LARG_BTN):
+                    texto, abrir_c, fechar_c = st.columns([8.5, 1, 1])
+                    texto.markdown(
+                        f"<div class='notif-txt'>{ponto}{n['texto']}</div>"
+                        f"<div class='notif-hora'>{quando}</div>",
+                        unsafe_allow_html=True)
+                    # Ícone em vez de palavra: o rótulo escrito mandava na
+                    # largura do botão e comia a coluna do texto.
+                    if n["tarefa_id"] and abrir_c.button("↗", key=f"nt_{n['id']}",
+                                                         help="Abrir tarefa", **LARG_BTN):
                         marcar_lidas(user, n["id"])
                         abrir_tarefa(n["tarefa_id"], user)
-                    st.divider()
-                if itens:
-                    c1, c2 = st.columns(2)
-                    if pendentes_n and c1.button("Marcar lidas", key="notif_todas", **LARG_BTN):
-                        marcar_lidas(user)
+                    if fechar_c.button("✕", key=f"nx_{n['id']}", help="Descartar",
+                                       **LARG_BTN):
+                        descartar_notificacao(user, n["id"])
                         rerun()
-                    if c2.button("Limpar tudo", key="notif_limpar", **LARG_BTN):
-                        limpar_notificacoes(user)
-                        rerun()
+                    if i < len(itens) - 1:
+                        st.markdown("<div class='notif-linha'></div>",
+                                    unsafe_allow_html=True)
+
                 ligado = st.session_state.get("som_ativo", True)
-                if st.button("🔊 Som ligado" if ligado else "🔇 Som desligado",
-                             key="som_toggle", **LARG_BTN):
+                b1, b2, b3, _ = st.columns([1, 1, 1, 3])
+                if pendentes_n and b1.button("✓", key="notif_todas",
+                                             help="Marcar todas como lidas", **LARG_BTN):
+                    marcar_lidas(user)
+                    rerun()
+                if itens and b2.button("🗑", key="notif_limpar",
+                                       help="Limpar tudo", **LARG_BTN):
+                    limpar_notificacoes(user)
+                    rerun()
+                if b3.button("🔊" if ligado else "🔇", key="som_toggle",
+                             help="Som ligado — clique para desligar" if ligado
+                                  else "Som desligado — clique para ligar", **LARG_BTN):
                     st.session_state.som_ativo = not ligado
                     rerun()
         else:
@@ -1213,8 +1265,9 @@ def contagens_pendentes(user: dict) -> dict:
     if user["papel"] == "admin":
         prorrog = consultar_um("SELECT COUNT(*) AS n FROM prorrogacoes "
                                "WHERE situacao = 'Pendente'")
-        conclu = consultar_um("SELECT COUNT(*) AS n FROM tarefas "
-                              "WHERE status = 'Realizado' AND aprovacao = 'Pendente'")
+        conclu = consultar_um("""SELECT COUNT(*) AS n FROM tarefas
+                                  WHERE status = 'Realizado' AND aprovacao = 'Pendente'
+                                    AND criador_id = %s""", (user["id"],))
     else:
         prorrog = consultar_um("""SELECT COUNT(*) AS n FROM prorrogacoes p
                                     JOIN tarefas t ON t.id = p.tarefa_id
@@ -1228,24 +1281,44 @@ def contagens_pendentes(user: dict) -> dict:
 
 
 def alertas(tarefas: list[dict], user: dict) -> None:
+    """Uma linha discreta de etiquetas, no lugar de quatro faixas empilhadas.
+
+    Os banners do Streamlit (error/warning/info) têm padding próprio e, com
+    três ou quatro deles, empurravam o quadro para fora da primeira tela. O
+    conteúdo é o mesmo — número e assunto —, só que numa tira que ocupa uma
+    linha e mantém a cor como código: vermelho atraso, âmbar vence hoje,
+    roxo esperando você.
+    """
     atrasadas = [t for t in tarefas if eh_atrasada(t)]
     minhas = [t for t in atrasadas if t.get("sou_responsavel")]
     vencem_hoje = [t for t in tarefas
                    if t["status"] != "Realizado" and t["prazo_atual"] == hoje()]
+    contas = st.session_state.get("painel") or contagens_pendentes(user)
+
+    etiquetas = []
     if atrasadas:
         alvo = minhas or atrasadas
-        titulos = ", ".join(t["titulo"] for t in alvo[:3])
-        extra = f" (+{len(alvo) - 3})" if len(alvo) > 3 else ""
-        st.error(f"**{len(atrasadas)} tarefa(s) em atraso.** {titulos}{extra}")
+        assunto = alvo[0]["titulo"]
+        if len(assunto) > 34:
+            assunto = assunto[:33] + "…"
+        resto = f" +{len(alvo) - 1}" if len(alvo) > 1 else ""
+        etiquetas.append((CORES["Atrasado"],
+                          f"{len(atrasadas)} em atraso · {assunto}{resto}"))
     if vencem_hoje:
-        st.warning(f"**{len(vencem_hoje)} tarefa(s) vencem hoje.**")
-    contas = st.session_state.get("painel") or contagens_pendentes(user)
-    if contas["prorrogacoes"]:
-        st.info(f"**{contas['prorrogacoes']} pedido(s) de prorrogação** aguardando sua "
-                "decisão — veja em Aprovações.")
+        etiquetas.append((CORES["Em andamento"], f"{len(vencem_hoje)} vence(m) hoje"))
     if contas["conclusoes"]:
-        st.info(f"**{contas['conclusoes']} conclusão(ões) aguardando sua aprovação** — "
-                "veja em Aprovações.")
+        etiquetas.append((CORES["Aguardando"],
+                          f"{contas['conclusoes']} conclusão(ões) a aprovar"))
+    if contas["prorrogacoes"]:
+        etiquetas.append((CORES["Aguardando"],
+                          f"{contas['prorrogacoes']} prorrogação(ões) a decidir"))
+    if not etiquetas:
+        return
+
+    tira = "".join(
+        f"<span class='alerta-chip' style='color:{cor};background:{cor}1c;"
+        f"border-color:{cor}55'>{texto}</span>" for cor, texto in etiquetas)
+    st.markdown(f"<div class='tira-alertas'>{tira}</div>", unsafe_allow_html=True)
 
 
 def avisar_novidades(user: dict, painel: dict) -> None:
@@ -1413,7 +1486,7 @@ def form_conclusao(t: dict, user: dict, chave: str = "det", em_dialogo: bool = F
     "Finalizar tarefa" e desenhar caixa dentro de caixa só encolhia o espaço
     útil — foi o que espremeu o botão Cancelar até quebrar a palavra no meio.
     """
-    auto = user["id"] == t["criador_id"]
+    sou_o_solicitante = user["id"] == t["criador_id"]
     moldura = contextlib.nullcontext() if em_dialogo else caixa()
     with moldura:
         if not em_dialogo:
@@ -1421,10 +1494,11 @@ def form_conclusao(t: dict, user: dict, chave: str = "det", em_dialogo: bool = F
         st.markdown(f"<div class='card-titulo' style='margin-top:0'>{t['titulo']}</div>",
                     unsafe_allow_html=True)
         st.markdown(
-            "<div class='meta'>Concluída na hora — você é quem pediu esta tarefa.</div>"
-            if auto else
-            f"<div class='meta'>Ao enviar, @{t['criador']} é notificado e decide se aceita. "
-            f"A tarefa fica em <b>aguardando aprovação</b> até lá.</div>",
+            "<div class='meta'>A tarefa fica em <b>aguardando aprovação</b>. Como você é "
+            "quem pediu, o botão de aceitar aparece logo em seguida.</div>"
+            if sou_o_solicitante else
+            f"<div class='meta'>@{t['criador']} é notificado e decide se aceita. Até lá a "
+            f"tarefa fica em <b>aguardando aprovação</b>.</div>",
             unsafe_allow_html=True)
         if t.get("aprovacao") == "Recusada" and t.get("aprovacao_obs"):
             st.warning(f"Recusada antes: {t['aprovacao_obs']}")
@@ -1434,8 +1508,7 @@ def form_conclusao(t: dict, user: dict, chave: str = "det", em_dialogo: bool = F
                                  key=f"cc_txt_{chave}_{t['id']}",
                                  placeholder="Pode ser só “OK”.")
             b1, b2 = st.columns(2)          # metade a metade: rótulo não quebra
-            enviar = b1.form_submit_button(
-                "Concluir" if auto else "Enviar", type="primary", **LARG_FSB)
+            enviar = b1.form_submit_button("Finalizar", type="primary", **LARG_FSB)
             cancelar = b2.form_submit_button("Cancelar", **LARG_FSB)
             if cancelar:
                 st.session_state.concluir_id = None
@@ -1444,11 +1517,11 @@ def form_conclusao(t: dict, user: dict, chave: str = "det", em_dialogo: bool = F
                 if not texto.strip():
                     st.error("Escreva ao menos uma palavra — vale “OK”.")
                 else:
-                    aprovada = enviar_conclusao(t, texto, user)
+                    enviar_conclusao(t, texto, user)
                     st.session_state.concluir_id = None
-                    if not aprovada:
-                        st.session_state.aviso = (
-                            f"Conclusão enviada para @{t['criador']} aprovar.", "ok")
+                    if sou_o_solicitante:
+                        # Quem pediu já cai na tarefa para aceitar de imediato.
+                        st.session_state.tarefa_sel = t["id"]
                     rerun()
 
 
@@ -1928,11 +2001,15 @@ def tela_detalhe(tid: int, user: dict) -> None:
                 rerun()
 
         # ---- anexos ----------------------------------------------------------
-        with caixa():
-            lista_anexos = anexos_da_tarefa(t["id"])
-            st.markdown(f"##### Anexos ({len(lista_anexos)})")
+        # Recolhido por padrão: o bloco aberto empurrava descrição e histórico
+        # para fora da tela. O total já aparece no próprio rótulo, então dá
+        # para saber que há anexo sem precisar abrir.
+        n_anexos = t.get("qtd_anexos") or 0
+        with st.expander(f"📎 Anexos ({n_anexos})"):
+            # Consulta só quando existe algo — tarefa sem anexo não gasta ida ao banco.
+            lista_anexos = anexos_da_tarefa(t["id"]) if n_anexos else []
             for a in lista_anexos:
-                c1, c2, c3 = st.columns([4, 1.4, 1])
+                c1, c2, c3 = st.columns([5, 1.3, 1])
                 c1.markdown(f"**{a['nome']}**  \n<span class='meta'>"
                             f"{tamanho_legivel(a['tamanho'])} · @{a['autor'] or 'sistema'} · "
                             f"{fmt_hora(a['criado_em'])}</span>", unsafe_allow_html=True)
@@ -1957,14 +2034,14 @@ def tela_detalhe(tid: int, user: dict) -> None:
 
             if pode_gerenciar(t, user):
                 arquivos = st.file_uploader(
-                    f"Anexar arquivos (até {MAX_ANEXO_MB} MB cada)",
-                    accept_multiple_files=True, key=f"upl_{t['id']}_{len(lista_anexos)}")
+                    f"Anexar (até {MAX_ANEXO_MB} MB cada)", accept_multiple_files=True,
+                    label_visibility="collapsed", key=f"upl_{t['id']}_{n_anexos}")
                 if arquivos and st.button("Enviar anexos", key="btn_anexar",
                                           type="primary", **LARG_BTN):
                     grandes = [a.name for a in arquivos
                                if len(a.getvalue()) > MAX_ANEXO_MB * 1024 * 1024]
                     if grandes:
-                        st.error(f"Arquivo(s) acima do limite: {', '.join(grandes)}")
+                        st.error(f"Acima do limite: {', '.join(grandes)}")
                     else:
                         for arq in arquivos:
                             salvar_anexo(t["id"], arq, user)
@@ -2178,8 +2255,8 @@ def main() -> None:
         tela_login()
         return
 
-    user = consultar_um("SELECT * FROM usuarios WHERE id = %s AND ativo",
-                        (st.session_state.usuario["id"],))
+    painel = painel_usuario(st.session_state.usuario)
+    user = painel.get("usuario")
     if not user:
         encerrar_sessao(st.session_state.get("token"))
         st.session_state.clear()
@@ -2189,8 +2266,7 @@ def main() -> None:
     st.session_state.setdefault("tarefa_sel", None)
     st.session_state.setdefault("concluir_id", None)
 
-    painel = painel_usuario(user)          # uma consulta serve a tela inteira
-    st.session_state.painel = painel
+    st.session_state.painel = painel       # a mesma consulta serve a tela inteira
     avisar_novidades(user, painel)
 
     if st.session_state.tarefa_sel:
