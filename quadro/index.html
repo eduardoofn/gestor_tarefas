@@ -172,6 +172,17 @@ function atualizarContadores() {
   });
 }
 
+// Selo é conteúdo NOSSO (rótulo fixo + cor), então pode ser montado por string.
+function selo(texto, cor) {
+  const s = document.createElement("span");
+  s.className = "selo";
+  s.style.color = cor;
+  s.style.background = cor + "22";
+  s.style.border = "1px solid " + cor + "55";
+  s.textContent = texto;
+  return s;
+}
+
 function montarCartao(card) {
   const el = document.createElement("div");
   el.className = "cartao";
@@ -183,25 +194,42 @@ function montarCartao(card) {
   el.style.color = T.ink;
 
   // O status já é dado pela coluna — só marcamos as exceções.
-  let selos = "";
-  if (card.atrasada)
-    selos += `<span class="selo" style="color:${card.acento};background:${card.acento}22;border:1px solid ${card.acento}55">atrasada</span> `;
-  if (card.aguardando) {
-    const cor = card.cor_aguardando || T.marca;
-    selos += `<span class="selo" style="color:${cor};background:${cor}22;border:1px solid ${cor}55">aguardando aprovação</span> `;
+  const selos = document.createElement("div");
+  if (card.atrasada) selos.appendChild(selo("atrasada", card.acento));
+  if (card.aguardando)
+    selos.appendChild(selo("aguardando aprovação", card.cor_aguardando || T.marca));
+  if (card.prorrogacao) selos.appendChild(selo("prorrogação", T.marca));
+  if (selos.childNodes.length) el.appendChild(selos);
+
+  /* Título e nomes vêm do usuário e NUNCA entram por innerHTML: um título como
+     <img src=x onerror=...> rodaria no navegador de todo mundo que abrisse o
+     quadro. Com textContent, o navegador trata como texto e ponto final. */
+  const titulo = document.createElement("div");
+  titulo.className = "titulo";
+  titulo.textContent = card.titulo;
+  el.appendChild(titulo);
+
+  const meta = document.createElement("div");
+  meta.className = "linha-meta";
+  meta.style.color = T.texto;
+
+  const pessoas = document.createElement("span");
+  pessoas.textContent = card.pessoas;
+  if (card.anexos) {
+    const clipe = document.createElement("span");
+    clipe.className = "clipe";
+    clipe.textContent = ` 📎 ${card.anexos}`;
+    pessoas.appendChild(clipe);
   }
-  if (card.prorrogacao)
-    selos += `<span class="selo" style="color:${T.marca};background:${T.marca}22;border:1px solid ${T.marca}55">prorrogação</span>`;
+  meta.appendChild(pessoas);
 
-  const clipe = card.anexos ? `<span class="clipe">📎 ${card.anexos}</span>` : "";
+  const prazo = document.createElement("span");
+  prazo.style.color = card.cor_prazo;
+  prazo.style.fontWeight = "800";
+  prazo.textContent = card.prazo;
+  meta.appendChild(prazo);
 
-  el.innerHTML =
-    (selos ? `<div>${selos}</div>` : "") +
-    `<div class="titulo">${card.titulo}</div>` +
-    `<div class="linha-meta" style="color:${T.texto}">` +
-      `<span>${card.pessoas} ${clipe}</span>` +
-      `<span style="color:${card.cor_prazo};font-weight:800">${card.prazo}</span>` +
-    `</div>`;
+  el.appendChild(meta);
 
   el.addEventListener("dragstart", () => {
     arrastado = card.id;

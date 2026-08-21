@@ -24,15 +24,18 @@ from __future__ import annotations
 import calendar as calmod
 import contextlib
 import hashlib
+import hmac
+import html
 import inspect
 import os
 import secrets
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
 from db import (ErroBanco, banco_vazio, binario, config_db, consultar,
-                consultar_um, executar, init_db, inserir)
+                consultar_um, cursor, executar, init_db, inserir)
 
 import streamlit.components.v1 as components
 
@@ -89,10 +92,12 @@ CORES = {
 # Anexos vão para o BYTEA do Postgres (o disco do Streamlit Cloud é volátil).
 MAX_ANEXO_MB = 10
 MAX_CARTOES_COLUNA = 40       # teto de desenho por coluna; o contador mostra o total
+# Altura da tabela da Lista: o padrão do Streamlit trava em ~10 linhas.
+ALTURA_MAX_TABELA = 620
 
 # Carimbo visível no menu da conta. Serve para responder de olho na tela a
 # pergunta "os arquivos novos entraram mesmo?" sem abrir editor nenhum.
-VERSAO = "v9 · 20/08/2026"
+VERSAO = "v13 · 20/08/2026"
 # Cada tique é uma reexecução inteira do app. Aumente se o quadro crescer
 # muito; desligue de vez pelo menu da conta.
 SEG_ATUALIZACAO = 90          # tique do sino nas telas de leitura
@@ -158,6 +163,15 @@ def _aceita(fn, arg: str) -> bool:
 
 
 FMT_DATA = {"format": "DD/MM/YYYY"} if _aceita(st.date_input, "format") else {}
+
+# `vertical_alignment` só existe da 1.36 em diante. Sem ele, a linha da Lista
+# ainda funciona — o texto fica colado no topo da célula, só isso.
+ALINHA_COL = ({"vertical_alignment": "center"}
+              if _aceita(st.columns, "vertical_alignment") else {})
+
+# Seleção de linha no st.dataframe existe da 1.35 em diante. Onde não existe,
+# a Lista cai no seletor de tarefa — mesma barra de ações nos dois casos.
+DF_SELECAO = _aceita(st.dataframe, "on_select") and _aceita(st.dataframe, "selection_mode")
 
 
 def caixa():
@@ -340,6 +354,11 @@ span[data-baseweb="tag"] {{ background: var(--marca) !important; color: #fff !im
         background: var(--item); border: 1px solid var(--linha); }}
 .dot {{ width: 9px; height: 9px; border-radius: 999px; display: inline-block; }}
 
+/* ---------- barra de ação da Lista ---------- */
+.lista-sel {{ font-size: 13.5px; font-weight: 700; color: var(--ink);
+              line-height: 1.35; overflow: hidden; text-overflow: ellipsis;
+              white-space: nowrap; }}
+
 /* ---------- geral ---------- */
 .meta {{ font-size: 11.5px; color: var(--muted); margin: 2px 0; }}
 .dia-num {{ font-size: 12px; font-weight: 800; color: var(--texto); }}
@@ -357,18 +376,36 @@ def badge(texto: str, cor: str) -> str:
             f"border:1px solid {cor}33'>{texto}</span>")
 
 
+def esc(texto: str | None) -> str:
+    """Texto de usuário indo para dentro de HTML nosso: aspas e sinais de
+    maior/menor viram entidades, senão um título com < > quebra a célula."""
+    return html.escape(texto or "", quote=True)
+
+
 def tags(nomes: str | None) -> str:
     if not nomes:
         return "<span class='tag'>sem responsável</span>"
-    return "".join(f"<span class='tag'>@{n.strip()}</span>" for n in nomes.split(","))
+    return "".join(f"<span class='tag'>@{esc(n.strip())}</span>" for n in nomes.split(","))
 
 
 # --------------------------------------------------------------------------- #
 # Utilitários
 # --------------------------------------------------------------------------- #
 
+# O relógio do processo é do servidor: no Streamlit Cloud, UTC. Sem fixar o
+# fuso, das 21h em diante o app já virou o dia — e a tarefa de amanhã aparece
+# como "vence hoje", a de hoje como "atrasada há 1 dia".
+FUSO = ZoneInfo(os.getenv("TZ_APP", "America/Fortaleza"))
+
+
+def agora() -> datetime:
+    """Horário local, sem tzinfo: as colunas do banco são TIMESTAMP sem fuso e
+    misturar datetime consciente com ingênuo estoura na subtração."""
+    return datetime.now(FUSO).replace(tzinfo=None)
+
+
 def hoje() -> date:
-    return date.today()
+    return agora().date()
 
 
 # ----- parâmetros da URL (compatível com versões antigas) -------------------- #
@@ -412,10 +449,10 @@ def sessao_valida(token: str) -> dict | None:
                              WHERE s.token = %s AND u.ativo""", (token,))
     if not linha:
         return None
-    if datetime.now() - linha["ultimo_acesso"] > timedelta(hours=HORAS_INATIVIDADE):
+    if agora() - linha["ultimo_acesso"] > timedelta(hours=HORAS_INATIVIDADE):
         executar("DELETE FROM sessoes WHERE token = %s", (token,))
         return None
-    executar("UPDATE sessoes SET ultimo_acesso = NOW() WHERE token = %s", (token,))
+    executar("UPDATE sessoes SET ultimo_acesso = %s WHERE token = %s", (agora(), token))
     return linha
 
 
@@ -484,14 +521,58 @@ def criar_usuario(nome: str, usuario: str, email: str, senha: str, papel: str) -
 def autenticar(usuario: str, senha: str) -> dict | None:
     u = consultar_um("SELECT * FROM usuarios WHERE usuario = %s AND ativo",
                      (usuario.strip().lower(),))
-    if u and gerar_hash(senha, u["salt"]) == u["senha_hash"]:
+    # compare_digest em vez de ==: a comparação normal para no primeiro byte
+    # diferente, e o tempo da resposta entrega quanto do hash foi acertado.
+    if u and hmac.compare_digest(gerar_hash(senha, u["salt"]), u["senha_hash"]):
         return u
     return None
 
 
-def registrar(tarefa_id: int, usuario_id: int | None, acao: str, detalhe: str = "") -> None:
-    executar("INSERT INTO historico (tarefa_id, usuario_id, acao, detalhe) "
-             "VALUES (%s, %s, %s, %s)", (tarefa_id, usuario_id, acao, detalhe))
+def trocar_senha(usuario_id: int, nova: str) -> None:
+    """Troca a senha e derruba as sessões abertas daquele usuário — senão o
+    token antigo continua valendo, e trocar a senha não expulsa ninguém."""
+    salt = secrets.token_hex(16)
+    with cursor(commit=True) as cur:
+        cur.execute("UPDATE usuarios SET senha_hash = %s, salt = %s WHERE id = %s",
+                    (gerar_hash(nova, salt), salt, usuario_id))
+        cur.execute("DELETE FROM sessoes WHERE usuario_id = %s", (usuario_id,))
+
+
+# Freio simples contra tentativa em série. Vive na sessão do navegador, então
+# não é barreira contra um script determinado — é o que dá para fazer sem
+# tabela nova, e já corta a digitação de senha no chute.
+TENTATIVAS_LIMITE = 5
+ESPERA_SEGUNDOS = 30
+
+
+def login_bloqueado() -> int:
+    """Segundos que ainda faltam para poder tentar de novo (0 = liberado)."""
+    ate = st.session_state.get("login_travado_ate")
+    if not ate:
+        return 0
+    faltam = int((ate - agora()).total_seconds())
+    if faltam <= 0:
+        st.session_state.login_travado_ate = None
+        st.session_state.login_falhas = 0
+        return 0
+    return faltam
+
+
+def registrar_falha_login() -> None:
+    falhas = st.session_state.get("login_falhas", 0) + 1
+    st.session_state.login_falhas = falhas
+    if falhas >= TENTATIVAS_LIMITE:
+        st.session_state.login_travado_ate = agora() + timedelta(seconds=ESPERA_SEGUNDOS)
+
+
+def registrar(tarefa_id: int, usuario_id: int | None, acao: str, detalhe: str = "",
+              cur=None) -> None:
+    """Com `cur`, o registro entra na MESMA transação de quem chamou — é assim
+    que a tarefa e sua trilha de auditoria nascem ou falham juntas."""
+    sql = ("INSERT INTO historico (tarefa_id, usuario_id, acao, detalhe) "
+           "VALUES (%s, %s, %s, %s)")
+    params = (tarefa_id, usuario_id, acao, detalhe)
+    cur.execute(sql, params) if cur else executar(sql, params)
 
 
 def nome_usuario(uid: int) -> str:
@@ -501,7 +582,7 @@ def nome_usuario(uid: int) -> str:
 
 # ----- notificações --------------------------------------------------------- #
 
-def eco(texto: str, tarefa_id: int | None = None) -> None:
+def eco(texto: str, tarefa_id: int | None = None, cur=None) -> None:
     """Retorno das SUAS próprias ações — na tela, no som e no sino.
 
     Notificação normal é para os outros: quem age não recebe aviso do próprio
@@ -514,18 +595,22 @@ def eco(texto: str, tarefa_id: int | None = None) -> None:
     if tarefa_id:
         usuario = st.session_state.get("usuario") or {}
         if usuario.get("id"):
-            executar("""INSERT INTO notificacoes (usuario_id, tarefa_id, tipo, texto, lida)
-                        VALUES (%s, %s, 'minha', %s, TRUE)""",
-                     (usuario["id"], tarefa_id, texto))
+            sql = ("""INSERT INTO notificacoes (usuario_id, tarefa_id, tipo, texto, lida)
+                      VALUES (%s, %s, 'minha', %s, TRUE)""")
+            params = (usuario["id"], tarefa_id, texto)
+            cur.execute(sql, params) if cur else executar(sql, params)
     if st.session_state.get("som_ativo", True) and st.session_state.get("eco_som", True):
         st.session_state.tocar_som = st.session_state.get("tocar_som", 0) + 1
 
 
-def notificar(destinos, tarefa_id: int, tipo: str, texto: str, exceto: int | None = None) -> None:
+def notificar(destinos, tarefa_id: int, tipo: str, texto: str, exceto: int | None = None,
+              cur=None) -> None:
     """Grava uma notificação por destinatário, sem notificar quem causou o evento."""
+    sql = ("INSERT INTO notificacoes (usuario_id, tarefa_id, tipo, texto) "
+           "VALUES (%s, %s, %s, %s)")
     for uid in {u for u in destinos if u and u != exceto}:
-        executar("INSERT INTO notificacoes (usuario_id, tarefa_id, tipo, texto) "
-                 "VALUES (%s, %s, %s, %s)", (uid, tarefa_id, tipo, texto))
+        params = (uid, tarefa_id, tipo, texto)
+        cur.execute(sql, params) if cur else executar(sql, params)
 
 
 def envolvidos(tid: int, criador_id: int | None = None) -> set[int]:
@@ -646,31 +731,39 @@ def usuarios_ativos() -> list[dict]:
 def criar_tarefa(titulo, descricao, criador_id, data_inicio, prazo, responsaveis,
                  status: str = "Iniciado", concluido_em=None) -> int:
     if status == "Realizado" and concluido_em is None:
-        concluido_em = datetime.now()
+        concluido_em = agora()
     # Nascer já em Realizado é decisão de quem cria — não precisa se aprovar.
     aprovacao = "Aprovada" if status == "Realizado" else None
-    tid = inserir(
-        """INSERT INTO tarefas (titulo, descricao, criador_id, data_inicio,
-                                prazo_original, prazo_atual, status, concluido_em,
-                                aprovacao, aprovado_por, aprovado_em, conclusao_em)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-        (titulo.strip(), descricao.strip(), criador_id, data_inicio, prazo, prazo,
-         status, concluido_em, aprovacao,
-         criador_id if aprovacao else None, concluido_em, concluido_em))
-    for uid in responsaveis:
-        executar("INSERT INTO tarefa_responsaveis (tarefa_id, usuario_id) VALUES (%s, %s)",
-                 (tid, uid))
-    # Um SELECT para todos os nomes, não um por responsável.
+    # Um SELECT para todos os nomes, não um por responsável (fora da transação:
+    # é leitura, e prender a conexão mais tempo não ajuda em nada).
     nomes = ", ".join(nomes_usuarios(responsaveis).values())
+    quem_criou = nome_usuario(criador_id)
     detalhe = f"Responsáveis: {nomes} | Prazo: {fmt_data(prazo)} | Coluna: {status}"
     if concluido_em:
         detalhe += f" | Concluída em {fmt_hora(concluido_em)}"
-    registrar(tid, criador_id, "Tarefa criada", detalhe)
-    notificar(responsaveis, tid, "marcado",
-              f"@{nome_usuario(criador_id)} marcou você em “{titulo.strip()}” — "
-              f"prazo {fmt_data(prazo)}", exceto=criador_id)
-    marcados = [u for u in responsaveis if u != criador_id]
-    eco(f"Tarefa #{tid} criada" + (f" e atribuída a {nomes}." if marcados else "."), tid)
+
+    # Tudo numa transação só. Antes eram N commits: uma queda no meio deixava
+    # tarefa sem responsável — invisível para quem não é admin, e sem trilha.
+    with cursor(commit=True) as cur:
+        cur.execute(
+            """INSERT INTO tarefas (titulo, descricao, criador_id, data_inicio,
+                                    prazo_original, prazo_atual, status, concluido_em,
+                                    aprovacao, aprovado_por, aprovado_em, conclusao_em)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+            (titulo.strip(), descricao.strip(), criador_id, data_inicio, prazo, prazo,
+             status, concluido_em, aprovacao,
+             criador_id if aprovacao else None, concluido_em, concluido_em))
+        tid = cur.fetchone()["id"]
+        for uid in responsaveis:
+            cur.execute("INSERT INTO tarefa_responsaveis (tarefa_id, usuario_id) "
+                        "VALUES (%s, %s)", (tid, uid))
+        registrar(tid, criador_id, "Tarefa criada", detalhe, cur=cur)
+        notificar(responsaveis, tid, "marcado",
+                  f"@{quem_criou} marcou você em “{titulo.strip()}” — "
+                  f"prazo {fmt_data(prazo)}", exceto=criador_id, cur=cur)
+        marcados = [u for u in responsaveis if u != criador_id]
+        eco(f"Tarefa #{tid} criada" + (f" e atribuída a {nomes}." if marcados else "."),
+            tid, cur=cur)
     return tid
 
 
@@ -783,8 +876,9 @@ def registrar_abertura(tid: int, user: dict) -> None:
     linha = consultar_um("SELECT aberto_em FROM tarefa_responsaveis "
                          "WHERE tarefa_id = %s AND usuario_id = %s", (tid, user["id"]))
     if linha and linha["aberto_em"] is None:
-        executar("UPDATE tarefa_responsaveis SET aberto_em = NOW() "
-                 "WHERE tarefa_id = %s AND usuario_id = %s", (tid, user["id"]))
+        executar("UPDATE tarefa_responsaveis SET aberto_em = %s "
+                 "WHERE tarefa_id = %s AND usuario_id = %s",
+                 (agora(), tid, user["id"]))
         registrar(tid, user["id"], "Tarefa aberta", "Confirmou leitura da atividade")
 
 
@@ -822,13 +916,13 @@ def enviar_conclusao(t: dict, texto: str, user: dict) -> bool:
     Devolve sempre False (nada é aprovado neste passo); a assinatura fica para
     não quebrar quem chama.
     """
-    agora = datetime.now()
+    momento = agora()
     executar("""UPDATE tarefas
                    SET status = 'Realizado', conclusao_texto = %s, conclusao_por = %s,
                        conclusao_em = %s, aprovacao = 'Pendente', aprovado_por = NULL,
                        aprovado_em = NULL, concluido_em = NULL, aprovacao_obs = NULL
                  WHERE id = %s""",
-             (texto.strip(), user["id"], agora, t["id"]))
+             (texto.strip(), user["id"], momento, t["id"]))
     registrar(t["id"], user["id"], "Conclusão enviada", texto.strip())
     eco(f"“{t['titulo']}” finalizada — aguardando a análise de @{t['criador']}.", t["id"])
     notificar([t["criador_id"]], t["id"], "aprovar",
@@ -838,13 +932,13 @@ def enviar_conclusao(t: dict, texto: str, user: dict) -> bool:
 
 
 def decidir_conclusao(t: dict, aprovar: bool, observacao: str, user: dict) -> None:
-    agora = datetime.now()
+    momento = agora()
     if aprovar:
         executar("""UPDATE tarefas SET aprovacao = 'Aprovada', aprovado_por = %s,
                            aprovado_em = %s, concluido_em = COALESCE(conclusao_em, %s),
                            aprovacao_obs = %s
                      WHERE id = %s""",
-                 (user["id"], agora, agora, observacao.strip() or None, t["id"]))
+                 (user["id"], momento, momento, observacao.strip() or None, t["id"]))
         registrar(t["id"], user["id"], "Conclusão aprovada", observacao.strip())
         eco(f"Conclusão de “{t['titulo']}” aceita.", t["id"])
         notificar(envolvidos(t["id"], t["criador_id"]), t["id"], "aprovada",
@@ -856,7 +950,7 @@ def decidir_conclusao(t: dict, aprovar: bool, observacao: str, user: dict) -> No
                            aprovado_por = %s, aprovado_em = %s, concluido_em = NULL,
                            aprovacao_obs = %s
                      WHERE id = %s""",
-                 (user["id"], agora, observacao.strip(), t["id"]))
+                 (user["id"], momento, observacao.strip(), t["id"]))
         registrar(t["id"], user["id"], "Conclusão recusada", observacao.strip())
         eco(f"Conclusão de “{t['titulo']}” recusada — volta para Em andamento.", t["id"])
         notificar(envolvidos(t["id"], t["criador_id"]), t["id"], "recusada",
@@ -886,17 +980,20 @@ def anexos_da_tarefa(tid: int, com_conteudo: bool = False) -> list[dict]:
 
 def salvar_anexo(tid: int, arquivo, user: dict) -> None:
     dados = arquivo.getvalue()
-    executar("""INSERT INTO anexos (tarefa_id, usuario_id, nome, tipo, tamanho, conteudo)
-                VALUES (%s, %s, %s, %s, %s, %s)""",
-             (tid, user["id"], arquivo.name, getattr(arquivo, "type", None),
-              len(dados), binario(dados)))
-    registrar(tid, user["id"], "Anexo adicionado",
-              f"{arquivo.name} ({tamanho_legivel(len(dados))})")
     linha = consultar_um("SELECT titulo, criador_id FROM tarefas WHERE id = %s", (tid,))
-    if linha:
-        notificar(envolvidos(tid, linha["criador_id"]), tid, "anexo",
-                  f"@{user['nome']} anexou {arquivo.name} em “{linha['titulo']}”",
-                  exceto=user["id"])
+    destinos = envolvidos(tid, linha["criador_id"]) if linha else set()
+    with cursor(commit=True) as cur:
+        cur.execute("""INSERT INTO anexos (tarefa_id, usuario_id, nome, tipo,
+                                           tamanho, conteudo)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    (tid, user["id"], arquivo.name, getattr(arquivo, "type", None),
+                     len(dados), binario(dados)))
+        registrar(tid, user["id"], "Anexo adicionado",
+                  f"{arquivo.name} ({tamanho_legivel(len(dados))})", cur=cur)
+        if linha:
+            notificar(destinos, tid, "anexo",
+                      f"@{user['nome']} anexou {arquivo.name} em “{linha['titulo']}”",
+                      exceto=user["id"], cur=cur)
 
 
 def excluir_anexo(anexo_id: int, tid: int, user: dict) -> None:
@@ -913,15 +1010,21 @@ def duplicar_tarefa(t: dict, titulo: str, inicio: date, prazo: date,
                     copiar_descricao: bool = True, copiar_anexos: bool = False) -> int:
     novo_id = criar_tarefa(titulo, t["descricao"] or "" if copiar_descricao else "",
                            user["id"], inicio, prazo, responsaveis, "Iniciado")
-    if copiar_anexos:
-        for a in anexos_da_tarefa(t["id"], com_conteudo=True):
-            executar("""INSERT INTO anexos (tarefa_id, usuario_id, nome, tipo, tamanho, conteudo)
-                        VALUES (%s, %s, %s, %s, %s, %s)""",
-                     (novo_id, user["id"], a["nome"], a["tipo"], a["tamanho"],
-                      binario(bytes(a["conteudo"]))))
-    registrar(novo_id, user["id"], "Cópia de tarefa",
-              f"Duplicada a partir de #{t['id']} — {t['titulo']}")
-    registrar(t["id"], user["id"], "Tarefa duplicada", f"Gerou a tarefa #{novo_id}")
+    with cursor(commit=True) as cur:
+        if copiar_anexos:
+            # Ou a cópia leva todos os anexos, ou não leva nenhum: meia cópia
+            # silenciosa é pior do que um erro na tela.
+            for a in anexos_da_tarefa(t["id"], com_conteudo=True):
+                cur.execute(
+                    """INSERT INTO anexos (tarefa_id, usuario_id, nome, tipo,
+                                           tamanho, conteudo)
+                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                    (novo_id, user["id"], a["nome"], a["tipo"], a["tamanho"],
+                     binario(bytes(a["conteudo"]))))
+        registrar(novo_id, user["id"], "Cópia de tarefa",
+                  f"Duplicada a partir de #{t['id']} — {t['titulo']}", cur=cur)
+        registrar(t["id"], user["id"], "Tarefa duplicada",
+                  f"Gerou a tarefa #{novo_id}", cur=cur)
     return novo_id
 
 
@@ -931,32 +1034,43 @@ def atualizar_tarefa(t: dict, titulo, descricao, inicio, novos_resp, user) -> No
         mudancas.append(f"Título: {t['titulo']} → {titulo.strip()}")
     if inicio != t["data_inicio"]:
         mudancas.append(f"Início: {fmt_data(t['data_inicio'])} → {fmt_data(inicio)}")
-    executar("UPDATE tarefas SET titulo = %s, descricao = %s, data_inicio = %s WHERE id = %s",
-             (titulo.strip(), descricao.strip(), inicio, t["id"]))
 
     atuais = set(responsaveis_ids(t["id"]))
     novos = set(novos_resp)
-    for uid in novos - atuais:
-        executar("INSERT INTO tarefa_responsaveis (tarefa_id, usuario_id) VALUES (%s, %s)",
-                 (t["id"], uid))
-        mudancas.append(f"Incluído @{nome_usuario(uid)}")
-        notificar([uid], t["id"], "marcado",
-                  f"@{user['nome']} marcou você em “{titulo.strip()}” — "
-                  f"prazo {fmt_data(t['prazo_atual'])}", exceto=user["id"])
-    for uid in atuais - novos:
-        executar("DELETE FROM tarefa_responsaveis WHERE tarefa_id = %s AND usuario_id = %s",
-                 (t["id"], uid))
-        mudancas.append(f"Removido @{nome_usuario(uid)}")
+    entram, saem = novos - atuais, atuais - novos
+    # Nomes resolvidos antes: dentro da transação só ficam as escritas.
+    nomes = nomes_usuarios(entram | saem)
+    mudancas += [f"Incluído @{nomes.get(uid, '?')}" for uid in entram]
+    mudancas += [f"Removido @{nomes.get(uid, '?')}" for uid in saem]
+    houve = bool(mudancas) or descricao.strip() != (t["descricao"] or "")
+    resumo = " | ".join(mudancas) or "Descrição atualizada"
+    # Leitura resolvida ANTES de abrir a transação: consulta feita lá dentro
+    # sairia por outra conexão do pool e não enxergaria o que ainda não foi
+    # confirmado — além de segurar duas conexões à toa.
+    avisar = envolvidos(t["id"], t["criador_id"]) | novos if houve else set()
 
-    if mudancas or descricao.strip() != (t["descricao"] or ""):
-        resumo = " | ".join(mudancas) or "Descrição atualizada"
-        registrar(t["id"], user["id"], "Tarefa editada", resumo)
-        # Dizer O QUE mudou, não só "salvo": é o que confirma que pegou.
-        eco(f"Tarefa #{t['id']} atualizada — {resumo}", t["id"])
-        notificar(envolvidos(t["id"], t["criador_id"]), t["id"], "editada",
-                  f"@{user['nome']} alterou “{titulo.strip()}”: {resumo}",
-                  exceto=user["id"])
-    else:
+    with cursor(commit=True) as cur:
+        cur.execute("UPDATE tarefas SET titulo = %s, descricao = %s, data_inicio = %s "
+                    "WHERE id = %s",
+                    (titulo.strip(), descricao.strip(), inicio, t["id"]))
+        for uid in entram:
+            cur.execute("INSERT INTO tarefa_responsaveis (tarefa_id, usuario_id) "
+                        "VALUES (%s, %s)", (t["id"], uid))
+            notificar([uid], t["id"], "marcado",
+                      f"@{user['nome']} marcou você em “{titulo.strip()}” — "
+                      f"prazo {fmt_data(t['prazo_atual'])}", exceto=user["id"], cur=cur)
+        for uid in saem:
+            cur.execute("DELETE FROM tarefa_responsaveis "
+                        "WHERE tarefa_id = %s AND usuario_id = %s", (t["id"], uid))
+        if houve:
+            registrar(t["id"], user["id"], "Tarefa editada", resumo, cur=cur)
+            # Dizer O QUE mudou, não só "salvo": é o que confirma que pegou.
+            eco(f"Tarefa #{t['id']} atualizada — {resumo}", t["id"], cur=cur)
+            notificar(avisar, t["id"], "editada",
+                      f"@{user['nome']} alterou “{titulo.strip()}”: {resumo}",
+                      exceto=user["id"], cur=cur)
+
+    if not houve:
         st.session_state.aviso = ("Nada mudou — nenhum campo foi alterado.", "alerta")
 
 
@@ -978,12 +1092,16 @@ def solicitar_prorrogacao(t: dict, novo_prazo: date, justificativa: str, user: d
 
 def decidir_prorrogacao(pedido: dict, aprovar: bool, user: dict) -> None:
     situacao = "Aprovada" if aprovar else "Recusada"
-    executar("UPDATE prorrogacoes SET situacao = %s, decidido_por = %s, decidido_em = NOW() "
-             "WHERE id = %s", (situacao, user["id"], pedido["id"]))
-    if aprovar:
-        # prazo_original NUNCA muda — fica o registro da data programada inicial.
-        executar("UPDATE tarefas SET prazo_atual = %s WHERE id = %s",
-                 (pedido["prazo_solicitado"], pedido["tarefa_id"]))
+    # Decisão e prazo mudam juntos: aprovar e não mover a data (ou o contrário)
+    # deixaria o pedido resolvido com a tarefa no prazo velho.
+    with cursor(commit=True) as cur:
+        cur.execute("UPDATE prorrogacoes SET situacao = %s, decidido_por = %s, "
+                    "decidido_em = %s WHERE id = %s",
+                    (situacao, user["id"], agora(), pedido["id"]))
+        if aprovar:
+            # prazo_original NUNCA muda — fica o registro da data programada inicial.
+            cur.execute("UPDATE tarefas SET prazo_atual = %s WHERE id = %s",
+                        (pedido["prazo_solicitado"], pedido["tarefa_id"]))
     registrar(pedido["tarefa_id"], user["id"], f"Prorrogação {situacao.lower()}",
               f"{fmt_data(pedido['prazo_anterior'])} → {fmt_data(pedido['prazo_solicitado'])}")
     notificar([pedido["solicitante_id"]], pedido["tarefa_id"], "prorrogacao",
@@ -1017,13 +1135,15 @@ def fechar_paineis(exceto: str | None = None) -> None:
     isso que mover uma tarefa abria a tela de criar tarefa. Toda ação vinda do
     quadro ou do calendário passa por aqui antes de abrir o que for dela.
     """
-    for bandeira in ("abrir_novo", "cal_dia", "concluir_id", "nova_em", "nova_data"):
+    for bandeira in ("abrir_novo", "cal_dia", "concluir_id", "nova_em",
+                     "nova_data", "dup_lista"):
         if bandeira != exceto:
             st.session_state[bandeira] = None if bandeira != "abrir_novo" else False
 
 
 def abrir_tarefa(tid: int, user: dict) -> None:
     st.session_state.abrir_novo = False
+    st.session_state.dup_lista = None
     registrar_abertura(tid, user)
     st.session_state.tarefa_sel = tid
     rerun()
@@ -1044,7 +1164,7 @@ def card_tarefa(t: dict, user: dict, chave: str) -> None:
         selo += " " + badge(f"📎 {t['qtd_anexos']}", "#64748b")
     st.markdown(
         f"<div class='card' style='--acc:{acento}'>{selo}"
-        f"<div class='card-titulo'>{t['titulo']}</div>"
+        f"<div class='card-titulo'>{esc(t['titulo'])}</div>"
         f"<div>{tags(t['responsaveis'])}</div>"
         f"<div class='rodape'>"
         f"<span>{fmt_data(t['data_inicio'])} → {fmt_data(t['prazo_atual'])}</span>"
@@ -1062,6 +1182,9 @@ def form_novo_card(status: str, user: dict) -> None:
         with st.form(f"add_{status}", clear_on_submit=True):
             titulo = st.text_input("Atividade", key=f"add_tit_{status}",
                                    placeholder="O quê precisa ser feito?")
+            descricao = st.text_area("Descrição (opcional)", height=90,
+                                     key=f"add_desc_card_{status}",
+                                     placeholder="Contexto, entregável esperado, links…")
             resp = st.multiselect("Responsáveis (@)", list(mapa), key=f"add_resp_{status}")
             prazo = st.date_input("Prazo", value=hoje() + timedelta(days=7),
                                   key=f"add_prazo_{status}", **FMT_DATA)
@@ -1071,7 +1194,7 @@ def form_novo_card(status: str, user: dict) -> None:
                 elif not resp:
                     st.error("Marque ao menos um responsável.")
                 else:
-                    criar_tarefa(titulo, "", user["id"], hoje(), prazo,
+                    criar_tarefa(titulo, descricao, user["id"], hoje(), prazo,
                                  [mapa[n] for n in resp], status)
                     rerun()
 
@@ -1081,6 +1204,8 @@ def conteudo_nova_tarefa(user: dict) -> None:
     aparece no instante em que a etapa Realizado é escolhida."""
     mapa = {u["nome"]: u["id"] for u in usuarios_ativos()}
     titulo = st.text_input("Atividade", key="qa_tit")
+    descricao = st.text_area("Descrição (opcional)", height=90, key="qa_desc",
+                             placeholder="Contexto, entregável esperado, links…")
     etapa = st.selectbox("Etapa", STATUS_LIST, index=1, key="qa_col")
     resp = st.multiselect("Responsáveis (@)", list(mapa), key="qa_resp")
     prazo = st.date_input("Prazo", value=hoje() + timedelta(days=7), key="qa_prazo", **FMT_DATA)
@@ -1096,10 +1221,10 @@ def conteudo_nova_tarefa(user: dict) -> None:
         elif not resp:
             st.error("Marque ao menos um responsável.")
         else:
-            criar_tarefa(titulo, "", user["id"], hoje(), prazo,
+            criar_tarefa(titulo, descricao, user["id"], hoje(), prazo,
                          [mapa[n] for n in resp], etapa,
                          datetime.combine(fim_em, datetime.min.time()) if fim_em else None)
-            for chave in ("qa_tit", "qa_resp"):
+            for chave in ("qa_tit", "qa_desc", "qa_resp"):
                 st.session_state.pop(chave, None)
             st.session_state.abrir_novo = False
             rerun()
@@ -1171,7 +1296,7 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                     quando = n.get("quando") or fmt_hora(n.get("criado_em"))
                     texto, abrir_c, fechar_c = st.columns([8.5, 1, 1])
                     texto.markdown(
-                        f"<div class='notif-txt'>{ponto}{n['texto']}</div>"
+                        f"<div class='notif-txt'>{ponto}{esc(n['texto'])}</div>"
                         f"<div class='notif-hora'>{quando}</div>",
                         unsafe_allow_html=True)
                     # Ícone em vez de palavra: o rótulo escrito mandava na
@@ -1210,7 +1335,8 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
     with conta_c:
         if hasattr(st, "popover"):
             with st.popover(iniciais(user["nome"]), **LARG_BTN):
-                st.markdown(f"<b>{user['nome']}</b><br><span class='meta'>@{user['usuario']} · "
+                st.markdown(f"<b>{esc(user['nome'])}</b><br>"
+                            f"<span class='meta'>@{esc(user['usuario'])} · "
                             f"{'Administrador' if user['papel'] == 'admin' else 'Usuário'}<br>"
                             f"Gestor de Tarefas {VERSAO}</span>",
                             unsafe_allow_html=True)
@@ -1303,7 +1429,7 @@ def alertas(tarefas: list[dict], user: dict) -> None:
             assunto = assunto[:33] + "…"
         resto = f" +{len(alvo) - 1}" if len(alvo) > 1 else ""
         etiquetas.append((CORES["Atrasado"],
-                          f"{len(atrasadas)} em atraso · {assunto}{resto}"))
+                          f"{len(atrasadas)} em atraso · {esc(assunto)}{resto}"))
     if vencem_hoje:
         etiquetas.append((CORES["Em andamento"], f"{len(vencem_hoje)} vence(m) hoje"))
     if contas["conclusoes"]:
@@ -1387,14 +1513,21 @@ def tela_login() -> None:
             usuario = st.text_input("Usuário", key="log_user")
             senha = st.text_input("Senha", type="password", key="log_senha")
             if st.form_submit_button("Entrar", type="primary", **LARG_FSB):
-                u = autenticar(usuario, senha)
-                if u:
-                    st.session_state.usuario = u
-                    st.session_state.token = abrir_sessao(u["id"])
-                    qp_gravar("s", st.session_state.token)
-                    rerun()
+                espera = login_bloqueado()
+                if espera:
+                    st.error(f"Muitas tentativas seguidas. Tente de novo em "
+                             f"{espera} segundo(s).")
                 else:
-                    st.error("Usuário ou senha inválidos.")
+                    u = autenticar(usuario, senha)
+                    if u:
+                        st.session_state.login_falhas = 0
+                        st.session_state.usuario = u
+                        st.session_state.token = abrir_sessao(u["id"])
+                        qp_gravar("s", st.session_state.token)
+                        rerun()
+                    else:
+                        registrar_falha_login()
+                        st.error("Usuário ou senha inválidos.")
 
 
 def montar_colunas(tarefas: list[dict]) -> list[dict]:
@@ -1440,22 +1573,29 @@ def montar_colunas(tarefas: list[dict]) -> list[dict]:
 def form_nova_tarefa_coluna(status: str, user: dict, prazo_sugerido=None) -> None:
     """Formulário que aparece quando o + da coluna (ou do dia) é clicado."""
     mapa = {u["nome"]: u["id"] for u in usuarios_ativos()}
+    # `status` é reatribuído logo abaixo quando o + vem do calendário; as chaves
+    # dos campos ficam presas ao valor de entrada para não trocarem de nome no
+    # meio do formulário (widget com chave nova perde o que já foi digitado).
+    base = status
     with caixa():
         titulo_form = (f"Nova tarefa com prazo em {fmt_data(prazo_sugerido)}"
                        if prazo_sugerido else f"Nova tarefa em {status}")
         st.markdown(f"<b>{titulo_form}</b>", unsafe_allow_html=True)
-        with st.form(f"add_{status}", clear_on_submit=True):
+        with st.form(f"add_{base}", clear_on_submit=True):
             c1, c2, c3 = st.columns([3, 2, 1.4])
-            titulo = c1.text_input("Atividade", key=f"add_tit_{status}")
-            resp = c2.multiselect("Responsáveis (@)", list(mapa), key=f"add_resp_{status}")
+            titulo = c1.text_input("Atividade", key=f"add_tit_{base}")
+            resp = c2.multiselect("Responsáveis (@)", list(mapa), key=f"add_resp_{base}")
             prazo = c3.date_input("Prazo", value=prazo_sugerido or hoje() + timedelta(days=7),
-                                  key=f"add_prazo_{status}", **FMT_DATA)
+                                  key=f"add_prazo_{base}", **FMT_DATA)
             if prazo_sugerido:
                 status = c2.selectbox("Coluna", STATUS_LIST, index=1, key="add_col_cal")
+            descricao = st.text_area("Descrição (opcional)", height=90,
+                                     key=f"add_desc_{base}",
+                                     placeholder="Contexto, entregável esperado, links…")
             fim_em = None
             if status == "Realizado":
                 fim_em = c3.date_input("Concluída em", value=hoje(),
-                                       key=f"add_fim_{status}", **FMT_DATA)
+                                       key=f"add_fim_{base}", **FMT_DATA)
             b1, b2, _ = st.columns([1, 1, 4])
             criar = b1.form_submit_button("Criar", type="primary", **LARG_FSB)
             cancelar = b2.form_submit_button("Cancelar", **LARG_FSB)
@@ -1470,7 +1610,7 @@ def form_nova_tarefa_coluna(status: str, user: dict, prazo_sugerido=None) -> Non
                     st.error("Marque ao menos um responsável.")
                 else:
                     criar_tarefa(
-                        titulo, "", user["id"], hoje(), prazo,
+                        titulo, descricao, user["id"], hoje(), prazo,
                         [mapa[n] for n in resp], status,
                         datetime.combine(fim_em, datetime.min.time()) if fim_em else None)
                     st.session_state.nova_em = None
@@ -1491,13 +1631,13 @@ def form_conclusao(t: dict, user: dict, chave: str = "det", em_dialogo: bool = F
     with moldura:
         if not em_dialogo:
             st.markdown("##### Finalizar tarefa")
-        st.markdown(f"<div class='card-titulo' style='margin-top:0'>{t['titulo']}</div>",
+        st.markdown(f"<div class='card-titulo' style='margin-top:0'>{esc(t['titulo'])}</div>",
                     unsafe_allow_html=True)
         st.markdown(
             "<div class='meta'>A tarefa fica em <b>aguardando aprovação</b>. Como você é "
             "quem pediu, o botão de aceitar aparece logo em seguida.</div>"
             if sou_o_solicitante else
-            f"<div class='meta'>@{t['criador']} é notificado e decide se aceita. Até lá a "
+            f"<div class='meta'>@{esc(t['criador'])} é notificado e decide se aceita. Até lá a "
             f"tarefa fica em <b>aguardando aprovação</b>.</div>",
             unsafe_allow_html=True)
         if t.get("aprovacao") == "Recusada" and t.get("aprovacao_obs"):
@@ -1537,8 +1677,8 @@ def caixa_aprovacao(t: dict, user: dict) -> None:
     """Quem criou analisa a conclusão: aceita e fecha, ou recusa e devolve."""
     with caixa():
         st.markdown("##### Analisar conclusão")
-        st.markdown(f"<div class='meta'>Finalizada por @{t.get('concluiu_nome') or '—'} em "
-                    f"{fmt_hora(t.get('conclusao_em'))}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div class='meta'>Finalizada por @{esc(t.get('concluiu_nome') or '—')} "
+                    f"em {fmt_hora(t.get('conclusao_em'))}</div>", unsafe_allow_html=True)
         st.write(t.get("conclusao_texto") or "_Sem descrição._")
         obs = st.text_area("Observação (obrigatória para recusar)", height=70,
                            key=f"apr_obs_{t['id']}")
@@ -1585,8 +1725,22 @@ def form_duplicar(t: dict, user: dict) -> None:
                                           [mapa[n] for n in novos], user,
                                           copiar_desc, copiar_anx)
                 st.session_state.aviso = f"Tarefa #{novo_id} criada como cópia."
+                st.session_state.dup_lista = None
                 st.session_state.tarefa_sel = novo_id
                 rerun()
+
+
+def _conteudo_dialogo_duplicar(t: dict, user: dict) -> None:
+    st.markdown(f"<div class='meta'>Cópia de #{t['id']} — {esc(t['titulo'])}</div>",
+                unsafe_allow_html=True)
+    form_duplicar(t, user)
+    if st.button("Cancelar", key=f"dupx_{t['id']}", **LARG_BTN):
+        st.session_state.dup_lista = None
+        rerun()
+
+
+_dialogo_duplicar = (st.dialog("Duplicar tarefa")(_conteudo_dialogo_duplicar)
+                     if hasattr(st, "dialog") else None)
 
 
 def aba_kanban(tarefas: list[dict], user: dict) -> None:
@@ -1688,7 +1842,7 @@ def conteudo_dia(dia: date, tarefas: list[dict], user: dict) -> None:
         if aguardando_aprovacao(t):
             selo = badge("Aguardando aprovação", CORES["Aguardando"])
         c1, c2 = st.columns([5, 1])
-        c1.markdown(f"{selo}<div class='card-titulo'>#{t['id']} — {t['titulo']}</div>"
+        c1.markdown(f"{selo}<div class='card-titulo'>#{t['id']} — {esc(t['titulo'])}</div>"
                     f"<div class='meta'>{tags(t['responsaveis'])}</div>"
                     f"<div class='meta' style='color:{cor}'>{rotulo}</div>",
                     unsafe_allow_html=True)
@@ -1700,7 +1854,7 @@ def conteudo_dia(dia: date, tarefas: list[dict], user: dict) -> None:
     if comeca:
         st.markdown("<div class='meta'><b>Começam neste dia</b></div>", unsafe_allow_html=True)
         for t in comeca:
-            st.markdown(f"<div class='meta'>#{t['id']} — {t['titulo']} "
+            st.markdown(f"<div class='meta'>#{t['id']} — {esc(t['titulo'])} "
                         f"(prazo {fmt_data(t['prazo_atual'])})</div>", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
@@ -1763,27 +1917,115 @@ def aba_calendario(tarefas: list[dict], user: dict) -> None:
             rerun()
 
 
+def altura_tabela(n_linhas: int) -> int:
+    """Altura em pixels para a tabela mostrar `n_linhas` sem rolagem interna.
+
+    O padrão do Streamlit trava em ~10 linhas e obriga a rolar dentro de uma
+    caixinha. Aqui a tabela cresce com o resultado até o teto — passar disso
+    empurraria a barra de ações para fora da tela."""
+    return min(max(n_linhas, 3) * 35 + 40, ALTURA_MAX_TABELA)
+
+
+def linhas_lista(tarefas: list[dict]) -> list[dict]:
+    """As colunas da tabela, na ordem em que aparecem."""
+    return [{"#": t["id"],
+             "Atividade": t["titulo"],
+             "Responsáveis": t["responsaveis"] or "—",
+             "Início": fmt_data(t["data_inicio"]),
+             "Prazo": fmt_data(t["prazo_atual"]),
+             "Prazo original": fmt_data(t["prazo_original"]),
+             "Status": "Atrasada" if eh_atrasada(t) else t["status"],
+             "Aprovação": t.get("aprovacao") or "—",
+             "Situação": situacao_prazo(t)[0],
+             "Anexos": t.get("qtd_anexos") or 0,
+             "Abriram": f"{t['qtd_abertos']}/{t['qtd_resp']}",
+             "Criador": t["criador"]}
+            for t in tarefas]
+
+
+def barra_acoes_lista(t: dict, user: dict) -> None:
+    """O que fazer com a tarefa selecionada: abrir ou duplicar."""
+    with caixa():
+        c1, c2, c3 = st.columns([6, 1.3, 1.3], **ALINHA_COL)
+        rotulo, cor = situacao_prazo(t)
+        c1.markdown(
+            f"<div class='lista-sel' title=\"{esc(t['titulo'])}\">#{t['id']} — "
+            f"{esc(t['titulo'])}</div>"
+            f"<div class='meta'>{esc(t['responsaveis'] or 'sem responsável')} · "
+            f"prazo {fmt_data(t['prazo_atual'])} · "
+            f"<span style='color:{cor};font-weight:700'>{rotulo}</span></div>",
+            unsafe_allow_html=True)
+        if c2.button("Abrir", key=f"lst_ab_{t['id']}", type="primary", **LARG_BTN):
+            abrir_tarefa(t["id"], user)
+        if pode_gerenciar(t, user):
+            if c3.button("Duplicar", key=f"lst_dup_{t['id']}", **LARG_BTN):
+                st.session_state.dup_lista = t["id"]
+                rerun()
+
+
 def aba_lista(tarefas: list[dict], user: dict) -> None:
+    """Tabela completa do Streamlit — com ordenação, busca e download nativos.
+
+    A tarefa é escolhida na própria tabela (clique na linha) quando a versão
+    instalada suporta seleção; nas anteriores, pelo seletor logo abaixo. Feita
+    a escolha, a barra de ações traz Abrir e Duplicar."""
     if not tarefas:
         st.info("Nenhuma tarefa encontrada com os filtros atuais.")
         return
-    st.dataframe(
-        [{"ID": t["id"], "Atividade": t["titulo"], "Responsáveis": t["responsaveis"] or "—",
-          "Início": fmt_data(t["data_inicio"]), "Prazo": fmt_data(t["prazo_atual"]),
-          "Prazo original": fmt_data(t["prazo_original"]),
-          "Status": "Atrasada" if eh_atrasada(t) else t["status"],
-          "Aprovação": t.get("aprovacao") or "—",
-          "Situação": situacao_prazo(t)[0], "Anexos": t.get("qtd_anexos") or 0,
-          "Abriram": f"{t['qtd_abertos']}/{t['qtd_resp']}", "Criador": t["criador"]}
-         for t in tarefas], hide_index=True, **LARG_DF)
 
-    titulos = {t["id"]: t["titulo"] for t in tarefas}
-    c1, c2 = st.columns([3, 1])
-    escolha = c1.selectbox("Abrir tarefa", options=[0] + list(titulos), key="lista_sel",
-                           format_func=lambda i: "Selecione…" if i == 0 else f"#{i} — {titulos[i]}")
-    c2.markdown("<br>", unsafe_allow_html=True)
-    if escolha and c2.button("Abrir", key="lista_abrir", type="primary", **LARG_BTN):
-        abrir_tarefa(escolha, user)
+    # Pedido de cópia: em diálogo quando a versão tem, senão numa caixa no
+    # topo, que é o único lugar onde não passa despercebido.
+    alvo_dup = next((t for t in tarefas
+                     if t["id"] == st.session_state.get("dup_lista")), None)
+    if st.session_state.get("dup_lista") and not alvo_dup:
+        st.session_state.dup_lista = None
+    elif alvo_dup and _dialogo_duplicar:
+        _dialogo_duplicar(alvo_dup, user)
+    elif alvo_dup:
+        with caixa():
+            st.markdown("##### Duplicar tarefa")
+            st.markdown(f"<div class='meta'>Cópia de #{alvo_dup['id']} — "
+                        f"{esc(alvo_dup['titulo'])}</div>", unsafe_allow_html=True)
+            form_duplicar(alvo_dup, user)
+            if st.button("Cancelar", key="dup_lista_cancel", **LARG_BTN):
+                st.session_state.dup_lista = None
+                rerun()
+
+    dados = linhas_lista(tarefas)
+    escolhida = None
+
+    if DF_SELECAO:
+        evento = st.dataframe(dados, hide_index=True, key="lista_df",
+                              on_select="rerun", selection_mode="single-row",
+                              height=altura_tabela(len(dados)), **LARG_DF)
+        # O retorno mudou de forma entre versões (objeto com .selection num
+        # lado, dicionário no outro) — os dois caminhos levam ao mesmo índice.
+        selecao = getattr(evento, "selection", None)
+        if selecao is None and isinstance(evento, dict):
+            selecao = evento.get("selection")
+        linhas = getattr(selecao, "rows", None)
+        if linhas is None and isinstance(selecao, dict):
+            linhas = selecao.get("rows")
+        linhas = linhas or []
+        if linhas and linhas[0] < len(tarefas):
+            escolhida = tarefas[linhas[0]]
+    else:
+        st.dataframe(dados, hide_index=True,
+                     height=altura_tabela(len(dados)), **LARG_DF)
+
+    if escolhida:
+        barra_acoes_lista(escolhida, user)
+    elif DF_SELECAO:
+        st.markdown(f"<div class='meta'>{len(tarefas)} tarefa(s) · clique numa linha "
+                    "para abrir ou duplicar</div>", unsafe_allow_html=True)
+    else:
+        # Versões anteriores à seleção na tabela: o seletor faz o mesmo papel.
+        titulos = {t["id"]: t["titulo"] for t in tarefas}
+        alvo = st.selectbox("Tarefa", options=[0] + list(titulos), key="lista_sel",
+                            format_func=lambda i: ("Selecione…" if i == 0
+                                                   else f"#{i} — {titulos[i]}"))
+        if alvo:
+            barra_acoes_lista(next(t for t in tarefas if t["id"] == alvo), user)
 
 
 def aba_nova_tarefa(user: dict) -> None:
@@ -1819,8 +2061,8 @@ def aba_prorrogacoes(user: dict) -> None:
         st.caption("Nenhuma conclusão aguardando análise.")
     for t in conclusoes:
         with caixa():
-            st.markdown(f"<div class='card-titulo'>#{t['id']} — {t['titulo']}</div>"
-                        f"<div class='meta'>Finalizada por @{t['concluiu_nome'] or '—'} em "
+            st.markdown(f"<div class='card-titulo'>#{t['id']} — {esc(t['titulo'])}</div>"
+                        f"<div class='meta'>Finalizada por @{esc(t['concluiu_nome'] or '—')} em "
                         f"{fmt_hora(t['conclusao_em'])} · prazo {fmt_data(t['prazo_atual'])}</div>",
                         unsafe_allow_html=True)
             st.write(t["conclusao_texto"] or "_Sem descrição._")
@@ -1845,11 +2087,11 @@ def aba_prorrogacoes(user: dict) -> None:
         st.caption("Nenhum pedido pendente.")
     for p in pendentes:
         with caixa():
-            st.markdown(f"<div class='card-titulo'>{p['titulo']}</div>"
-                        f"<div class='meta'>Solicitado por @{p['solicitante']}</div>"
+            st.markdown(f"<div class='card-titulo'>{esc(p['titulo'])}</div>"
+                        f"<div class='meta'>Solicitado por @{esc(p['solicitante'])}</div>"
                         f"<div class='meta'>Prazo atual {fmt_data(p['prazo_anterior'])} → "
                         f"solicitado <b>{fmt_data(p['prazo_solicitado'])}</b></div>"
-                        f"<div class='meta'>Justificativa: {p['justificativa'] or '—'}</div>",
+                        f"<div class='meta'>Justificativa: {esc(p['justificativa'] or '—')}</div>",
                         unsafe_allow_html=True)
             c1, c2, _ = st.columns([1, 1, 3])
             if c1.button("Aprovar", key=f"ap_{p['id']}", type="primary", **LARG_BTN):
@@ -1868,7 +2110,7 @@ def aba_prorrogacoes(user: dict) -> None:
     for p in meus:
         cor = {"Pendente": "#ea580c", "Aprovada": CORES["Realizado"],
                "Recusada": CORES["Atrasado"]}[p["situacao"]]
-        st.markdown(f"{badge(p['situacao'], cor)} &nbsp; <b>{p['titulo']}</b> "
+        st.markdown(f"{badge(p['situacao'], cor)} &nbsp; <b>{esc(p['titulo'])}</b> "
                     f"<span class='meta'>{fmt_data(p['prazo_anterior'])} → "
                     f"{fmt_data(p['prazo_solicitado'])}</span>", unsafe_allow_html=True)
 
@@ -1917,10 +2159,9 @@ def aba_usuarios(user: dict) -> None:
     with c2:
         nova = st.text_input("Nova senha", type="password", key="usr_senha")
         if st.button("Redefinir senha", key="usr_reset", **LARG_BTN) and nova:
-            salt = secrets.token_hex(16)
-            executar("UPDATE usuarios SET senha_hash = %s, salt = %s WHERE id = %s",
-                     (gerar_hash(nova, salt), salt, alvo["id"]))
-            st.success(f"Senha de {alvo['nome']} redefinida.")
+            trocar_senha(alvo["id"], nova)
+            st.success(f"Senha de {alvo['nome']} redefinida — as sessões abertas "
+                       "dessa pessoa foram encerradas.")
 
 
 def aba_conta(user: dict) -> None:
@@ -1937,10 +2178,12 @@ def aba_conta(user: dict) -> None:
             elif nova != conf:
                 st.error("A confirmação não confere.")
             else:
-                salt = secrets.token_hex(16)
-                executar("UPDATE usuarios SET senha_hash = %s, salt = %s WHERE id = %s",
-                         (gerar_hash(nova, salt), salt, user["id"]))
-                st.success("Senha alterada com sucesso.")
+                # Derruba as outras sessões e abre uma nova para quem está aqui:
+                # trocar a senha na máquina do escritório deve deslogar o resto.
+                trocar_senha(user["id"], nova)
+                st.session_state.token = abrir_sessao(user["id"])
+                qp_gravar("s", st.session_state.token)
+                st.success("Senha alterada. As demais sessões foram encerradas.")
 
 
 def tela_detalhe(tid: int, user: dict) -> None:
@@ -1961,7 +2204,7 @@ def tela_detalhe(tid: int, user: dict) -> None:
                 + (badge("Aguardando aprovação", CORES["Aguardando"]) + " &nbsp; "
                    if aguardando_aprovacao(t) else "")
                 + badge(t["status"], CORES[t["status"]])
-                + f"<div class='titulo-app' style='margin-top:8px'>{t['titulo']}</div>"
+                + f"<div class='titulo-app' style='margin-top:8px'>{esc(t['titulo'])}</div>"
                 + f"<div style='color:{cor};font-weight:700;margin-bottom:6px'>{rotulo}</div>",
                 unsafe_allow_html=True)
 
@@ -1978,7 +2221,8 @@ def tela_detalhe(tid: int, user: dict) -> None:
             else:
                 with caixa():
                     st.markdown("##### Conclusão enviada")
-                    st.markdown(f"<div class='meta'>Aguardando o aceite de @{t['criador']} · "
+                    st.markdown(f"<div class='meta'>Aguardando o aceite de "
+                                f"@{esc(t['criador'])} · "
                                 f"enviada em {fmt_hora(t['conclusao_em'])}</div>",
                                 unsafe_allow_html=True)
                     st.write(t["conclusao_texto"] or "_Sem descrição._")
@@ -1986,7 +2230,7 @@ def tela_detalhe(tid: int, user: dict) -> None:
             with caixa():
                 st.markdown("##### Conclusão")
                 st.write(t["conclusao_texto"] or "_Sem descrição._")
-                st.markdown(f"<div class='meta'>Aceita por @{t.get('aprovou_nome') or '—'} "
+                st.markdown(f"<div class='meta'>Aceita por @{esc(t.get('aprovou_nome') or '—')} "
                             f"em {fmt_hora(t.get('aprovado_em'))}</div>",
                             unsafe_allow_html=True)
         elif pode_gerenciar(t, user):
@@ -1995,7 +2239,7 @@ def tela_detalhe(tid: int, user: dict) -> None:
                            f"{t['aprovacao_obs']}")
             if st.session_state.get("concluir_id") == t["id"]:
                 form_conclusao(t, user)
-            elif st.button("✔ Finalizar tarefa", key="det_concluir",
+            elif st.button("✔ Finalizar tarefa", key=f"det_concluir_{t['id']}",
                            type="primary", **LARG_BTN):
                 st.session_state.concluir_id = t["id"]
                 rerun()
@@ -2010,8 +2254,9 @@ def tela_detalhe(tid: int, user: dict) -> None:
             lista_anexos = anexos_da_tarefa(t["id"]) if n_anexos else []
             for a in lista_anexos:
                 c1, c2, c3 = st.columns([5, 1.3, 1])
-                c1.markdown(f"**{a['nome']}**  \n<span class='meta'>"
-                            f"{tamanho_legivel(a['tamanho'])} · @{a['autor'] or 'sistema'} · "
+                c1.markdown(f"**{esc(a['nome'])}**  \n<span class='meta'>"
+                            f"{tamanho_legivel(a['tamanho'])} · "
+                            f"@{esc(a['autor'] or 'sistema')} · "
                             f"{fmt_hora(a['criado_em'])}</span>", unsafe_allow_html=True)
                 # O BYTEA só é lido quando alguém pede aquele arquivo — carregar
                 # todos os anexos a cada rerun encheria a memória à toa.
@@ -2036,7 +2281,7 @@ def tela_detalhe(tid: int, user: dict) -> None:
                 arquivos = st.file_uploader(
                     f"Anexar (até {MAX_ANEXO_MB} MB cada)", accept_multiple_files=True,
                     label_visibility="collapsed", key=f"upl_{t['id']}_{n_anexos}")
-                if arquivos and st.button("Enviar anexos", key="btn_anexar",
+                if arquivos and st.button("Enviar anexos", key=f"btn_anexar_{t['id']}",
                                           type="primary", **LARG_BTN):
                     grandes = [a.name for a in arquivos
                                if len(a.getvalue()) > MAX_ANEXO_MB * 1024 * 1024]
@@ -2055,11 +2300,15 @@ def tela_detalhe(tid: int, user: dict) -> None:
             with st.expander("Editar tarefa"):
                 mapa = {u["nome"]: u["id"] for u in usuarios_ativos()}
                 atuais = [n for n, i in mapa.items() if i in responsaveis_ids(t["id"])]
-                with st.form("editar"):
-                    novo_tit = st.text_input("Título", value=t["titulo"], key="ed_tit")
-                    nova_desc = st.text_area("Descrição", value=t["descricao"] or "", height=110, key="ed_desc")
-                    novos = st.multiselect("Responsáveis (@)", list(mapa), default=atuais, key="ed_resp")
-                    novo_ini = st.date_input("Data de início", value=t["data_inicio"], key="ed_ini", **FMT_DATA)
+                with st.form(f"editar_{t['id']}"):
+                    novo_tit = st.text_input("Título", value=t["titulo"],
+                                             key=f"ed_tit_{t['id']}")
+                    nova_desc = st.text_area("Descrição", value=t["descricao"] or "",
+                                             height=110, key=f"ed_desc_{t['id']}")
+                    novos = st.multiselect("Responsáveis (@)", list(mapa), default=atuais,
+                                           key=f"ed_resp_{t['id']}")
+                    novo_ini = st.date_input("Data de início", value=t["data_inicio"],
+                                             key=f"ed_ini_{t['id']}", **FMT_DATA)
                     if st.form_submit_button("Salvar alterações", type="primary", **LARG_FSB):
                         if not novo_tit.strip():
                             st.error("O título não pode ficar vazio.")
@@ -2072,8 +2321,9 @@ def tela_detalhe(tid: int, user: dict) -> None:
 
             with st.expander("Excluir tarefa"):
                 st.warning("A exclusão apaga responsáveis, prorrogações e histórico da tarefa.")
-                if st.checkbox("Confirmo a exclusão", key="conf_del") and \
-                   st.button("Excluir definitivamente", key="btn_del", **LARG_BTN):
+                if st.checkbox("Confirmo a exclusão", key=f"conf_del_{t['id']}") and \
+                   st.button("Excluir definitivamente", key=f"btn_del_{t['id']}",
+                             **LARG_BTN):
                     excluir_tarefa(t["id"])
                     st.session_state.tarefa_sel = None
                     rerun()
@@ -2085,18 +2335,22 @@ def tela_detalhe(tid: int, user: dict) -> None:
                                WHERE h.tarefa_id = %s ORDER BY h.id DESC LIMIT 30""", (tid,))
         ultimo = eventos[0] if eventos else None
         if ultimo:
-            st.markdown(f"<div class='meta'>Última movimentação: <b>{ultimo['acao']}</b> — "
-                        f"{ultimo['nome'] or 'Sistema'} · {fmt_hora(ultimo['criado_em'])}</div>",
+            st.markdown(f"<div class='meta'>Última movimentação: "
+                        f"<b>{esc(ultimo['acao'])}</b> — {esc(ultimo['nome'] or 'Sistema')} · "
+                        f"{fmt_hora(ultimo['criado_em'])}</div>",
                         unsafe_allow_html=True)
         rotulo_hist = (f"Histórico (últimos {len(eventos)})" if len(eventos) == 30
                        else f"Histórico ({len(eventos)} registro(s))")
         with st.expander(rotulo_hist):
             for e in eventos:
-                st.markdown(f"**{e['acao']}** — {e['nome'] or 'Sistema'} · {fmt_hora(e['criado_em'])}  \n"
-                            f"<span class='meta'>{e['detalhe'] or ''}</span>", unsafe_allow_html=True)
+                st.markdown(f"**{esc(e['acao'])}** — {esc(e['nome'] or 'Sistema')} · "
+                            f"{fmt_hora(e['criado_em'])}  \n"
+                            f"<span class='meta'>{esc(e['detalhe'] or '')}</span>",
+                            unsafe_allow_html=True)
 
-        with st.form("comentario", clear_on_submit=True):
-            texto = st.text_area("Adicionar comentário ao histórico", height=80, key="det_coment")
+        with st.form(f"comentario_{tid}", clear_on_submit=True):
+            texto = st.text_area("Adicionar comentário ao histórico", height=80,
+                                 key=f"det_coment_{tid}")
             if st.form_submit_button("Registrar comentário") and texto.strip():
                 registrar(tid, user["id"], "Comentário", texto.strip())
                 rerun()
@@ -2120,17 +2374,17 @@ def tela_detalhe(tid: int, user: dict) -> None:
 
         with caixa():
             st.markdown("##### Quem")
-            st.markdown(f"<div class='meta'>Criada por @{t['criador']}</div>",
+            st.markdown(f"<div class='meta'>Criada por @{esc(t['criador'])}</div>",
                         unsafe_allow_html=True)
             for r in consultar("""SELECT u.nome, tr.aberto_em FROM tarefa_responsaveis tr
                                   JOIN usuarios u ON u.id = tr.usuario_id
                                   WHERE tr.tarefa_id = %s ORDER BY u.nome""", (tid,)):
                 if r["aberto_em"]:
-                    st.markdown(f"**@{r['nome']}**  \n"
+                    st.markdown(f"**@{esc(r['nome'])}**  \n"
                                 f"<span class='meta'>abriu em {fmt_hora(r['aberto_em'])}</span>",
                                 unsafe_allow_html=True)
                 else:
-                    st.markdown(f"**@{r['nome']}**  \n"
+                    st.markdown(f"**@{esc(r['nome'])}**  \n"
                                 f"<span class='meta'>ainda não abriu</span>",
                                 unsafe_allow_html=True)
 
@@ -2141,8 +2395,9 @@ def tela_detalhe(tid: int, user: dict) -> None:
                 opcoes = [s for s in STATUS_LIST if s != "Realizado"]
                 atual = t["status"] if t["status"] in opcoes else opcoes[0]
                 novo = st.selectbox("Status", opcoes, index=opcoes.index(atual),
-                                    key="det_status")
-                if st.button("Salvar status", type="primary", key="det_salvar", **LARG_BTN):
+                                    key=f"det_status_{t['id']}")
+                if st.button("Salvar status", type="primary",
+                             key=f"det_salvar_{t['id']}", **LARG_BTN):
                     if alterar_status(t, novo, user):
                         rerun()
                     else:
@@ -2155,10 +2410,12 @@ def tela_detalhe(tid: int, user: dict) -> None:
                     st.info(f"Pedido pendente para {fmt_data(pendente['prazo_solicitado'])}.")
                 else:
                     with st.expander("Pedir prorrogação"):
-                        with st.form("prorrogar"):
+                        with st.form(f"prorrogar_{t['id']}"):
                             novo_prazo = st.date_input(
-                                "Novo prazo", value=t["prazo_atual"] + timedelta(days=7), key="pr_prazo", **FMT_DATA)
-                            just = st.text_area("Justificativa", height=80, key="pr_just")
+                                "Novo prazo", value=t["prazo_atual"] + timedelta(days=7),
+                                key=f"pr_prazo_{t['id']}", **FMT_DATA)
+                            just = st.text_area("Justificativa", height=80,
+                                                key=f"pr_just_{t['id']}")
                             if st.form_submit_button("Solicitar", **LARG_FSB):
                                 if novo_prazo <= t["prazo_atual"]:
                                     st.error("O novo prazo precisa ser posterior ao atual.")

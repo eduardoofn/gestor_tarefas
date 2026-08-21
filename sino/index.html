@@ -114,11 +114,23 @@ function traduzirCalendario(raiz) {
   });
 }
 
+/* O observador via em CADA mutação da página — e o quadro muda muito (arrastar
+   um cartão dispara dezenas). Agora as mutações são agrupadas num quadro de
+   animação: no máximo uma varredura por repintura, e o querySelectorAll só
+   roda quando há algo pendente. */
 try {
   const doc = window.parent.document;
+  let agendado = false;
+  const varrer = () => {
+    agendado = false;
+    const abertos = doc.querySelectorAll(
+      '[data-baseweb="calendar"], [data-baseweb="datepicker"]');
+    if (abertos.length) abertos.forEach(traduzirCalendario);
+  };
   const observador = new MutationObserver(() => {
-    doc.querySelectorAll('[data-baseweb="calendar"], [data-baseweb="datepicker"]')
-       .forEach(traduzirCalendario);
+    if (agendado) return;
+    agendado = true;
+    requestAnimationFrame(varrer);
   });
   observador.observe(doc.body, { childList: true, subtree: true });
 } catch (e) { /* origem diferente: segue em inglês, sem quebrar nada */ }
