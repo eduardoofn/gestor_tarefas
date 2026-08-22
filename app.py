@@ -22,6 +22,7 @@ na própria tela. A partir daí, usuários são apenas linhas na tabela usuarios
 from __future__ import annotations
 
 import calendar as calmod
+import base64
 import contextlib
 import hashlib
 import hmac
@@ -63,11 +64,22 @@ def calendario_mes(dados: dict, key: str = "calendario"):
 # que é o que faz o Streamlit reexecutar sozinho e buscar novas notificações.
 _PASTA_SINO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sino")
 _sino_componente = components.declare_component("sino_alerta", path=_PASTA_SINO)
+_CAMINHO_LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "LOGOAVANSEG.png")
 
 
 def sino_alerta(tocar: int, intervalo: int = 0, key: str = "sino"):
     """`tocar` muda → toca o som. `intervalo` > 0 → tique de atualização."""
     return _sino_componente(tocar=tocar, intervalo=intervalo, default=None, key=key)
+
+
+def mostrar_logo(largura: int = 130) -> None:
+    """Mostra a logo centralizada, mantendo o topo compacto."""
+    with open(_CAMINHO_LOGO, "rb") as arquivo:
+        imagem = base64.b64encode(arquivo.read()).decode("ascii")
+    st.markdown(
+        f"<div class='logo-centro'><img src='data:image/png;base64,{imagem}' "
+        f"width='{largura}' alt='Avanseg'></div>",
+        unsafe_allow_html=True)
 
 # --------------------------------------------------------------------------- #
 # Constantes
@@ -200,6 +212,36 @@ def montar_css(tema: str) -> str:
 }}
 
 .stApp {{ background: var(--fundo); }}
+.logo-centro {{ text-align: center; line-height: 0; margin: 0 0 6px 0; }}
+
+/* O Streamlit renderiza popovers e menus em uma camada própria. No tema claro,
+   fixe o contraste também nessa camada para não herdar o visual escuro. */
+body:has(.stApp) div[data-baseweb="popover"],
+body:has(.stApp) div[data-baseweb="menu"],
+body:has(.stApp) ul[data-baseweb="menu"] {{
+    background: {p['painel']} !important; color: {p['ink']} !important;
+}}
+body:has(.stApp) div[data-baseweb="popover"] button,
+body:has(.stApp) div[data-baseweb="menu"] button,
+body:has(.stApp) ul[data-baseweb="menu"] button {{
+    background: {p['item']} !important; color: {p['ink']} !important;
+    border-color: {p['linha']} !important;
+}}
+body:has(.stApp) div[data-baseweb="popover"] button *,
+body:has(.stApp) div[data-baseweb="menu"] button *,
+body:has(.stApp) ul[data-baseweb="menu"] button * {{
+    color: {p['ink']} !important; fill: {p['ink']} !important;
+}}
+body:has(.stApp) div[data-baseweb="popover"] li,
+body:has(.stApp) div[data-baseweb="menu"] li,
+body:has(.stApp) ul[data-baseweb="menu"] li {{
+    background: {p['painel']} !important; color: {p['ink']} !important;
+}}
+body:has(.stApp) div[data-baseweb="popover"] li:hover,
+body:has(.stApp) div[data-baseweb="menu"] li:hover,
+body:has(.stApp) ul[data-baseweb="menu"] li:hover {{
+    background: {p['item2']} !important; color: {p['ink']} !important;
+}}
 
 /* topo do Streamlit: sem barra, sem borda, sem sobra de espaço */
 header[data-testid="stHeader"], div[data-testid="stDecoration"],
@@ -255,6 +297,10 @@ div[data-testid="stPopover"] button {{
     border: 1px solid var(--linha) !important; font-size: 12.5px !important;
     padding: 2px 10px !important; min-height: 30px !important;
     white-space: nowrap !important; }}
+.stApp .stButton button *, .stApp .stFormSubmitButton button *,
+div[data-testid="stPopover"] button * {{ color: inherit !important; }}
+.stApp .stButton button svg, .stApp .stFormSubmitButton button svg,
+div[data-testid="stPopover"] button svg {{ fill: currentColor !important; }}
 /* Espaçamento geral mais curto: o Streamlit separa cada bloco vertical com
    1rem, e na tela da tarefa — descrição, conclusão, anexos, gerenciar,
    histórico — isso somava uma rolagem inteira de ar. */
@@ -308,7 +354,9 @@ div[data-testid="stPopover"] .stButton button p {{ margin: 0 !important; }}
 div[data-baseweb="popover"] > div, div[data-baseweb="menu"], ul[data-baseweb="menu"] {{
     background: var(--painel) !important; color: var(--ink) !important;
     border: 1px solid var(--linha) !important; }}
-div[data-baseweb="popover"] li, div[data-baseweb="menu"] li {{ color: var(--ink) !important; }}
+div[data-baseweb="popover"] li, div[data-baseweb="menu"] li,
+div[data-baseweb="popover"] li *, div[data-baseweb="menu"] li * {{
+    color: var(--ink) !important; }}
 span[data-baseweb="tag"] {{ background: var(--marca) !important; color: #fff !important; }}
 
 .stApp [data-testid="stCaptionContainer"] p {{ color: var(--muted) !important; }}
@@ -1249,10 +1297,14 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
     if atual not in paginas + ["Usuários", "Minha conta"]:
         atual = "Kanban"
 
-    titulo, menu_c, novo_c, filtro_c, sino_c, conta_c = st.columns([11, 1, 1, 1, 1, 1])
+    titulo, logo_c, menu_c, novo_c, filtro_c, sino_c, conta_c = st.columns(
+        [5, 6, 1, 1, 1, 1, 1])
 
     with titulo:
         st.markdown("<div class='titulo-app'>Gestor de Tarefas</div>", unsafe_allow_html=True)
+
+    with logo_c:
+        mostrar_logo(largura=70)
 
     with menu_c:
         if hasattr(st, "popover"):
@@ -1477,6 +1529,7 @@ def avisar_novidades(user: dict, painel: dict) -> None:
 def tela_primeiro_acesso() -> None:
     """Aparece só enquanto a tabela de usuários estiver vazia."""
     st.markdown("<br>", unsafe_allow_html=True)
+    mostrar_logo()
     _, meio, _ = st.columns([1, 1.4, 1])
     with meio:
         st.markdown("<div class='eyebrow'>Primeiro acesso</div>"
@@ -1504,6 +1557,7 @@ def tela_primeiro_acesso() -> None:
 
 def tela_login() -> None:
     st.markdown("<br>", unsafe_allow_html=True)
+    mostrar_logo()
     _, meio, _ = st.columns([1, 1.2, 1])
     with meio:
         st.markdown("<div class='eyebrow'>Plano de ação</div>"
