@@ -109,7 +109,7 @@ ALTURA_MAX_TABELA = 620
 
 # Carimbo visível no menu da conta. Serve para responder de olho na tela a
 # pergunta "os arquivos novos entraram mesmo?" sem abrir editor nenhum.
-VERSAO = "v13 · 20/08/2026"
+VERSAO = "v.0.1.14 · 20/08/2026"
 # Cada tique é uma reexecução inteira do app. Aumente se o quadro crescer
 # muito; desligue de vez pelo menu da conta.
 SEG_ATUALIZACAO = 90          # tique do sino nas telas de leitura
@@ -255,6 +255,7 @@ div[data-testid="stExpander"] details {{ border-color: var(--linha) !important;
 /* Todo o visual dos componentes nativos vem daqui — o app não depende de
    .streamlit/config.toml, então funciona igual no local e no Streamlit Cloud. */
 .stApp, .stApp .stMarkdown p, .stApp .stMarkdown li {{ color: var(--ink); }}
+.stApp p, .stApp div, .stApp span {{ color: var(--ink); }}
 [data-testid="stWidgetLabel"] p, .stApp label p, .stApp label {{
     color: var(--texto) !important; font-weight: 600; }}
 
@@ -2222,6 +2223,7 @@ def aba_conta(user: dict) -> None:
     st.markdown("#### Alterar minha senha")
     with st.form("trocar_senha"):
         atual = st.text_input("Senha atual", type="password", key="mc_atual")
+        st.caption("Mínimo 6 caracteres")
         nova = st.text_input("Nova senha", type="password", key="mc_nova")
         conf = st.text_input("Confirmar nova senha", type="password", key="mc_conf")
         if st.form_submit_button("Alterar senha", type="primary", **LARG_FSB):
