@@ -109,7 +109,7 @@ ALTURA_MAX_TABELA = 620
 
 # Carimbo visível no menu da conta. Serve para responder de olho na tela a
 # pergunta "os arquivos novos entraram mesmo?" sem abrir editor nenhum.
-VERSAO = "v.0.1.15 · 28/08/2026"
+VERSAO = "v.0.1.16 · 28/08/2026"
 # Cada tique é uma reexecução inteira do app. Aumente se o quadro crescer
 # muito; desligue de vez pelo menu da conta.
 SEG_ATUALIZACAO = 90          # tique do sino nas telas de leitura
@@ -274,8 +274,13 @@ div[data-testid="stExpander"] details {{ border-color: var(--linha) !important;
     border-color: {p['linha']} !important;
     color: {p['ink']} !important;
 }}
+/* ---- campos ----
+   O fundo vai no PRÓPRIO input/textarea, não só no invólucro: quando o
+   seletor do invólucro erra o alvo — e ele muda de versão para versão do
+   Streamlit — sobra o cinza claro do tema-base com a letra clara por cima, que
+   era o texto sumindo no tema escuro. */
 .stApp input, .stApp textarea, .stApp div[data-baseweb="select"] div {{
-    background-color: transparent !important;
+    background-color: {p['item']} !important;
     color: {p['ink']} !important;
     -webkit-text-fill-color: {p['ink']} !important;
     caret-color: {MARCA};
@@ -420,44 +425,80 @@ span[data-baseweb="tag"] {{ background: var(--marca) !important; color: #fff !im
 .vazio {{ text-align: center; color: var(--muted); font-size: 12.5px; padding: 14px 0;
           border: 1px dashed var(--linha); border-radius: 9px; }}
 
-/* ---------- camada flutuante (diálogo) ----------
-   O Streamlit desenha o diálogo FORA do .stApp, então toda regra presa a
-   .stApp para na porta — o mesmo motivo que obrigou os popovers, lá em cima,
-   a serem escritos a partir do `body`. O fundo escuro chegava lá por essas
-   regras de popover; a cor do texto, não. E `color` não é herdado por input
-   nem por textarea: o campo ficava com a cor padrão do tema-base do
-   Streamlit, escura, sobre o fundo escuro do painel. Daí o texto sumir só no
-   tema escuro. */
-body [data-testid="stDialog"], body [data-testid="stDialog"] > div,
-body div[role="dialog"] {{
-    background: {p['painel']} !important; color: {p['ink']} !important; }}
-body [data-testid="stDialog"] .stMarkdown,
-body [data-testid="stDialog"] .stMarkdown p,
-body [data-testid="stDialog"] .stMarkdown li,
-body [data-testid="stDialog"] h1, body [data-testid="stDialog"] h2,
-body [data-testid="stDialog"] h3, body [data-testid="stDialog"] h4,
-body [data-testid="stDialog"] h5 {{ color: {p['ink']} !important; }}
-body [data-testid="stDialog"] label,
-body [data-testid="stDialog"] [data-testid="stWidgetLabel"] p {{
-    color: {p['texto']} !important; }}
-body [data-testid="stDialog"] [data-testid="stCaptionContainer"] p,
-body [data-testid="stDialog"] .meta {{ color: {p['muted']} !important; }}
+/* ---------- camada flutuante: diálogo, popover e menu ----------
+   Duas coisas obrigam estas regras a existirem separadas:
+   1. O Streamlit desenha diálogo e popover FORA do .stApp, então toda regra
+      presa a .stApp para na porta.
+   2. Os atributos data-baseweb dos campos mudam de versão para versão. Por
+      isso aqui o alvo é o data-testid do widget e o próprio elemento — o que
+      não muda —, e o fundo vai no input/textarea, não só na casca. */
 
-/* A cor do texto do campo não pode depender de ONDE o campo foi desenhado.
-   `opacity` entra junto porque o BaseWeb esmaece campo desabilitado até ele
-   encostar no fundo. */
-body input, body textarea, body [data-baseweb="input"] input,
-body [data-baseweb="textarea"] textarea, body [data-baseweb="select"] div {{
+body [data-testid="stTextArea"] textarea,
+body [data-testid="stTextInput"] input,
+body textarea,
+body input:not([type="checkbox"]):not([type="radio"]):not([type="file"]) {{
+    background-color: {p['item']} !important;
     color: {p['ink']} !important;
     -webkit-text-fill-color: {p['ink']} !important;
     opacity: 1 !important; }}
+body [data-testid="stTextArea"] > div, body [data-testid="stTextArea"] > div > div,
+body [data-testid="stTextInput"] > div, body [data-testid="stTextInput"] > div > div,
+body [data-testid="stDateInput"] > div, body [data-testid="stDateInput"] > div > div,
+body [data-testid="stNumberInput"] > div, body [data-testid="stNumberInput"] > div > div,
+body [data-testid="stSelectbox"] > div, body [data-testid="stSelectbox"] > div > div,
+body [data-testid="stMultiSelect"] > div, body [data-testid="stMultiSelect"] > div > div,
 body [data-baseweb="input"], body [data-baseweb="base-input"],
-body [data-baseweb="textarea"] {{
+body [data-baseweb="textarea"], body [data-baseweb="select"] > div {{
     background-color: {p['item']} !important;
     border-color: {p['linha']} !important; }}
 body input::placeholder, body textarea::placeholder {{
     color: {p['muted']} !important;
     -webkit-text-fill-color: {p['muted']} !important; }}
+
+/* Botões, inclusive os do menu da conta e da navegação, que ficam no popover.
+   O rótulo é um <p> DENTRO do <button> e não herda cor de contêiner: pintar só
+   o painel deixava letra clara sobre botão branco — o menu apagado. Por isso a
+   cor é aplicada no botão E nos filhos. */
+body .stButton button, body .stFormSubmitButton button {{
+    background: {p['item']} !important;
+    border: 1px solid {p['linha']} !important; }}
+body .stButton button, body .stButton button *,
+body .stFormSubmitButton button, body .stFormSubmitButton button * {{
+    color: {p['ink']} !important; fill: {p['ink']} !important; }}
+body .stButton button:hover, body .stFormSubmitButton button:hover {{
+    border-color: {MARCA} !important; }}
+body .stButton button:hover *, body .stFormSubmitButton button:hover * {{
+    color: {MARCA} !important; fill: {MARCA} !important; }}
+
+body .stButton button[kind="primary"],
+body .stFormSubmitButton button[kind="primaryFormSubmit"],
+body [data-testid="stBaseButton-primary"],
+body [data-testid="stBaseButton-primaryFormSubmit"] {{
+    background: {MARCA} !important; border-color: {MARCA} !important; }}
+body .stButton button[kind="primary"], body .stButton button[kind="primary"] *,
+body .stButton button[kind="primary"]:hover *,
+body .stFormSubmitButton button[kind="primaryFormSubmit"],
+body .stFormSubmitButton button[kind="primaryFormSubmit"] *,
+body [data-testid="stBaseButton-primary"], body [data-testid="stBaseButton-primary"] *,
+body [data-testid="stBaseButton-primaryFormSubmit"],
+body [data-testid="stBaseButton-primaryFormSubmit"] * {{
+    color: #ffffff !important; fill: #ffffff !important; }}
+
+/* Painel do diálogo: fundo aqui, cor de texto só nos elementos de texto. Cor
+   solta no contêiner escorre para dentro dos botões — foi o que apagou o
+   rótulo deles. */
+body [data-testid="stDialog"] > div, body [data-testid="stDialog"] [role="dialog"] {{
+    background: {p['painel']} !important; }}
+body [data-testid="stDialog"] .stMarkdown, body [data-testid="stDialog"] .stMarkdown p,
+body [data-testid="stDialog"] .stMarkdown li, body [data-testid="stDialog"] h1,
+body [data-testid="stDialog"] h2, body [data-testid="stDialog"] h3,
+body [data-testid="stDialog"] h4, body [data-testid="stDialog"] h5 {{
+    color: {p['ink']} !important; }}
+body [data-testid="stDialog"] label,
+body [data-testid="stDialog"] [data-testid="stWidgetLabel"] p {{
+    color: {p['texto']} !important; }}
+body [data-testid="stDialog"] [data-testid="stCaptionContainer"] p,
+body [data-testid="stDialog"] .meta {{ color: {p['muted']} !important; }}
 </style>
 """
 
@@ -1438,7 +1479,7 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                 st.markdown(f"<b>{esc(user['nome'])}</b><br>"
                             f"<span class='meta'>@{esc(user['usuario'])} · "
                             f"{'Administrador' if user['papel'] == 'admin' else 'Usuário'}<br>"
-                            f"Gestor de Tarefas {VERSAO}</span>",
+                            f"Gestor de Tarefas {VERSAO} · Streamlit {st.__version__}</span>",
                             unsafe_allow_html=True)
                 st.divider()
                 if user["papel"] == "admin" and st.button("Usuários", key="cta_usuarios", **LARG_BTN):
