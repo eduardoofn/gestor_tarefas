@@ -109,7 +109,7 @@ ALTURA_MAX_TABELA = 620
 
 # Carimbo visível no menu da conta. Serve para responder de olho na tela a
 # pergunta "os arquivos novos entraram mesmo?" sem abrir editor nenhum.
-VERSAO = "v.0.1.16 · 28/08/2026"
+VERSAO = "v.0.1.17 · 28/08/2026"
 # Cada tique é uma reexecução inteira do app. Aumente se o quadro crescer
 # muito; desligue de vez pelo menu da conta.
 SEG_ATUALIZACAO = 90          # tique do sino nas telas de leitura
@@ -1016,7 +1016,14 @@ def registrar_abertura(tid: int, user: dict) -> None:
 
 def alterar_status(t: dict, novo: str, user: dict) -> bool:
     """Move entre colunas. Ir para Realizado NÃO passa por aqui — exige a
-    descrição de conclusão e o aceite do solicitante (ver enviar_conclusao)."""
+    descrição de conclusão e o aceite do solicitante (ver enviar_conclusao).
+
+    Com conclusão enviada e ainda sem aceite, a tarefa fica congelada: mexer no
+    status aqui apagaria a análise que está na mesa de quem pediu. A recusa
+    fica no fundo, e não só na tela, porque a mesma função é chamada pelo
+    arrastar do quadro e pelo seletor da tela de detalhe."""
+    if aguardando_aprovacao(t):
+        return False
     if novo == t["status"]:
         return False
     if novo == "Realizado":
@@ -1565,23 +1572,17 @@ def alertas(tarefas: list[dict], user: dict) -> None:
     três ou quatro deles, empurravam o quadro para fora da primeira tela. O
     conteúdo é o mesmo — número e assunto —, só que numa tira que ocupa uma
     linha e mantém a cor como código: vermelho atraso, âmbar vence hoje,
-    roxo esperando você.
+    roxo esperando você. Só o número e o assunto, no mesmo formato em todas —
+    o título da tarefa atrasada saiu daqui, que é lugar de contagem.
     """
     atrasadas = [t for t in tarefas if eh_atrasada(t)]
-    minhas = [t for t in atrasadas if t.get("sou_responsavel")]
     vencem_hoje = [t for t in tarefas
                    if t["status"] != "Realizado" and t["prazo_atual"] == hoje()]
     contas = st.session_state.get("painel") or contagens_pendentes(user)
 
     etiquetas = []
     if atrasadas:
-        alvo = minhas or atrasadas
-        assunto = alvo[0]["titulo"]
-        if len(assunto) > 34:
-            assunto = assunto[:33] + "…"
-        resto = f" +{len(alvo) - 1}" if len(alvo) > 1 else ""
-        etiquetas.append((CORES["Atrasado"],
-                          f"{len(atrasadas)} em atraso · {esc(assunto)}{resto}"))
+        etiquetas.append((CORES["Atrasado"], f"{len(atrasadas)} em atraso"))
     if vencem_hoje:
         etiquetas.append((CORES["Em andamento"], f"{len(vencem_hoje)} vence(m) hoje"))
     if contas["conclusoes"]:
@@ -1926,6 +1927,13 @@ def aba_kanban(tarefas: list[dict], user: dict) -> None:
         alvo = next((t for t in tarefas if t["id"] == evento.get("id")), None)
         if alvo:
             if evento["acao"] == "mover" and evento["para"] != alvo["status"]:
+                # O cartão travado volta sozinho para a coluna de origem: o
+                # quadro é redesenhado a partir do banco no rerun logo abaixo.
+                if aguardando_aprovacao(alvo):
+                    st.session_state.aviso = (
+                        f"“{alvo['titulo']}” está aguardando aprovação. Enquanto "
+                        f"@{alvo['criador']} não decidir, ela não se move.", "alerta")
+                    rerun()
                 if evento["para"] == "Realizado":
                     if alvo.get("sou_responsavel") or pode_aprovar(alvo, user):
                         st.session_state.concluir_id = alvo["id"]
@@ -2436,14 +2444,18 @@ def tela_detalhe(tid: int, user: dict) -> None:
                 elif c2.button("Baixar", key=f"prep_{a['id']}", **LARG_BTN):
                     st.session_state.baixar_anexo = a["id"]
                     rerun()
-                if (pode_editar(t, user) or a["usuario_id"] == user["id"]) and \
+                if not aguardando_aprovacao(t) and \
+                   (pode_editar(t, user) or a["usuario_id"] == user["id"]) and \
                    c3.button("Excluir", key=f"delanx_{a['id']}", **LARG_BTN):
                     excluir_anexo(a["id"], t["id"], user)
                     rerun()
             if not lista_anexos:
                 st.caption("Nenhum arquivo anexado.")
 
-            if pode_gerenciar(t, user):
+            if aguardando_aprovacao(t):
+                st.caption("Tarefa aguardando aprovação: os arquivos ficam como "
+                           "estão até a decisão de quem pediu.")
+            elif pode_gerenciar(t, user):
                 arquivos = st.file_uploader(
                     f"Anexar (até {MAX_ANEXO_MB} MB cada)", accept_multiple_files=True,
                     label_visibility="collapsed", key=f"upl_{t['id']}_{n_anexos}")
@@ -2514,12 +2526,16 @@ def tela_detalhe(tid: int, user: dict) -> None:
                             f"<span class='meta'>{esc(e['detalhe'] or '')}</span>",
                             unsafe_allow_html=True)
 
-        with st.form(f"comentario_{tid}", clear_on_submit=True):
-            texto = st.text_area("Adicionar comentário ao histórico", height=80,
-                                 key=f"det_coment_{tid}")
-            if st.form_submit_button("Registrar comentário") and texto.strip():
-                registrar(tid, user["id"], "Comentário", texto.strip())
-                rerun()
+        if aguardando_aprovacao(t):
+            st.caption("Comentários reabrem quando a conclusão for aceita ou "
+                       "recusada — até lá, use a observação da análise.")
+        else:
+            with st.form(f"comentario_{tid}", clear_on_submit=True):
+                texto = st.text_area("Adicionar comentário ao histórico", height=80,
+                                     key=f"det_coment_{tid}")
+                if st.form_submit_button("Registrar comentário") and texto.strip():
+                    registrar(tid, user["id"], "Comentário", texto.strip())
+                    rerun()
 
     with dir_:
         with caixa():
@@ -2554,7 +2570,16 @@ def tela_detalhe(tid: int, user: dict) -> None:
                                 f"<span class='meta'>ainda não abriu</span>",
                                 unsafe_allow_html=True)
 
-        if pode_gerenciar(t, user):
+        if aguardando_aprovacao(t) and pode_gerenciar(t, user):
+            with caixa():
+                st.markdown("##### Gerenciar")
+                st.markdown(
+                    "<div class='meta'>Tarefa <b>aguardando aprovação</b>. Status, "
+                    "prorrogação, anexos e comentários ficam parados até "
+                    f"@{esc(t['criador'])} aceitar ou recusar a conclusão. "
+                    "Excluir e duplicar continuam disponíveis.</div>",
+                    unsafe_allow_html=True)
+        elif pode_gerenciar(t, user):
             with caixa():
                 st.markdown("##### Gerenciar")
                 # Realizado não é escolha de selectbox: passa pela conclusão.
