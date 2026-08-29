@@ -109,7 +109,7 @@ ALTURA_MAX_TABELA = 620
 
 # Carimbo visível no menu da conta. Serve para responder de olho na tela a
 # pergunta "os arquivos novos entraram mesmo?" sem abrir editor nenhum.
-VERSAO = "v.0.1.14 · 20/08/2026"
+VERSAO = "v.0.1.15 · 28/08/2026"
 # Cada tique é uma reexecução inteira do app. Aumente se o quadro crescer
 # muito; desligue de vez pelo menu da conta.
 SEG_ATUALIZACAO = 90          # tique do sino nas telas de leitura
@@ -419,6 +419,45 @@ span[data-baseweb="tag"] {{ background: var(--marca) !important; color: #fff !im
 .riscado {{ text-decoration: line-through; color: var(--muted); }}
 .vazio {{ text-align: center; color: var(--muted); font-size: 12.5px; padding: 14px 0;
           border: 1px dashed var(--linha); border-radius: 9px; }}
+
+/* ---------- camada flutuante (diálogo) ----------
+   O Streamlit desenha o diálogo FORA do .stApp, então toda regra presa a
+   .stApp para na porta — o mesmo motivo que obrigou os popovers, lá em cima,
+   a serem escritos a partir do `body`. O fundo escuro chegava lá por essas
+   regras de popover; a cor do texto, não. E `color` não é herdado por input
+   nem por textarea: o campo ficava com a cor padrão do tema-base do
+   Streamlit, escura, sobre o fundo escuro do painel. Daí o texto sumir só no
+   tema escuro. */
+body [data-testid="stDialog"], body [data-testid="stDialog"] > div,
+body div[role="dialog"] {{
+    background: {p['painel']} !important; color: {p['ink']} !important; }}
+body [data-testid="stDialog"] .stMarkdown,
+body [data-testid="stDialog"] .stMarkdown p,
+body [data-testid="stDialog"] .stMarkdown li,
+body [data-testid="stDialog"] h1, body [data-testid="stDialog"] h2,
+body [data-testid="stDialog"] h3, body [data-testid="stDialog"] h4,
+body [data-testid="stDialog"] h5 {{ color: {p['ink']} !important; }}
+body [data-testid="stDialog"] label,
+body [data-testid="stDialog"] [data-testid="stWidgetLabel"] p {{
+    color: {p['texto']} !important; }}
+body [data-testid="stDialog"] [data-testid="stCaptionContainer"] p,
+body [data-testid="stDialog"] .meta {{ color: {p['muted']} !important; }}
+
+/* A cor do texto do campo não pode depender de ONDE o campo foi desenhado.
+   `opacity` entra junto porque o BaseWeb esmaece campo desabilitado até ele
+   encostar no fundo. */
+body input, body textarea, body [data-baseweb="input"] input,
+body [data-baseweb="textarea"] textarea, body [data-baseweb="select"] div {{
+    color: {p['ink']} !important;
+    -webkit-text-fill-color: {p['ink']} !important;
+    opacity: 1 !important; }}
+body [data-baseweb="input"], body [data-baseweb="base-input"],
+body [data-baseweb="textarea"] {{
+    background-color: {p['item']} !important;
+    border-color: {p['linha']} !important; }}
+body input::placeholder, body textarea::placeholder {{
+    color: {p['muted']} !important;
+    -webkit-text-fill-color: {p['muted']} !important; }}
 </style>
 """
 
@@ -1439,12 +1478,19 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                 qp_limpar()
                 rerun()
 
-    # Se a página mudou desde o último desenho, o diálogo não deve reaparecer.
-    if st.session_state.get("pagina_anterior") != atual:
-        st.session_state.pagina_anterior = atual
-        st.session_state.abrir_novo = False
+    st.session_state.pagina_anterior = atual
 
-    if st.session_state.get("abrir_novo") and _dialogo_nova:
+    # Uma abertura por clique. Fechar o diálogo no X não volta para o Python,
+    # então um sinalizador que ficasse ligado reabriria a janela na próxima
+    # reexecução inteira do script — era o que acontecia ao clicar em qualquer
+    # botão da mesma página (a guarda por página só pegava troca de tela).
+    #
+    # O flag também não é necessário para o diálogo CONTINUAR aberto: st.dialog
+    # é um fragmento, então mexer na etapa reexecuta só a janela, e é dali que
+    # vem o campo condicional "Concluída em".
+    st.session_state.dialogo_aberto = False
+    if st.session_state.pop("abrir_novo", False) and _dialogo_nova:
+        st.session_state.dialogo_aberto = True
         _dialogo_nova(user)
 
     return atual
@@ -1817,6 +1863,12 @@ def aba_kanban(tarefas: list[dict], user: dict) -> None:
     if st.session_state.get("concluir_id"):
         alvo = next((t for t in tarefas if t["id"] == st.session_state.concluir_id), None)
         if alvo and _dialogo_conclusao:
+            # Mesma regra do diálogo de nova tarefa: uma abertura por pedido,
+            # senão fechar no X e clicar em outra coisa traz a janela de volta.
+            # A limpeza fica só aqui, no ramo do diálogo: na tela de detalhe a
+            # mesma chave desenha o formulário em caixa e precisa continuar.
+            st.session_state.concluir_id = None
+            st.session_state.dialogo_aberto = True
             _dialogo_conclusao(alvo, user)
         elif alvo:
             form_conclusao(alvo, user, chave="kanban")
@@ -1949,7 +2001,10 @@ def aba_calendario(tarefas: list[dict], user: dict) -> None:
 
     if st.session_state.get("cal_dia"):
         if _dialogo_dia:
-            _dialogo_dia(st.session_state.cal_dia, tarefas, user)
+            dia_alvo = st.session_state.cal_dia
+            st.session_state.cal_dia = None      # uma abertura por clique
+            st.session_state.dialogo_aberto = True
+            _dialogo_dia(dia_alvo, tarefas, user)
         else:
             with caixa():
                 conteudo_dia(st.session_state.cal_dia, tarefas, user)
@@ -2047,6 +2102,8 @@ def aba_lista(tarefas: list[dict], user: dict) -> None:
     if st.session_state.get("dup_lista") and not alvo_dup:
         st.session_state.dup_lista = None
     elif alvo_dup and _dialogo_duplicar:
+        st.session_state.dup_lista = None        # uma abertura por clique
+        st.session_state.dialogo_aberto = True
         _dialogo_duplicar(alvo_dup, user)
     elif alvo_dup:
         with caixa():
@@ -2636,7 +2693,11 @@ def main() -> None:
 
     # Atualização automática só nas telas de leitura: em formulário, um rerun
     # no meio da digitação seria um estorvo.
-    rodape_sino(ativo=pagina in ("Kanban", "Calendário", "Lista"))
+    # Com diálogo aberto o tique fica de fora: ele reexecuta o script inteiro,
+    # e agora que a janela é aberta uma vez só, um tique no meio da digitação
+    # fecharia o formulário na cara do usuário.
+    rodape_sino(ativo=pagina in ("Kanban", "Calendário", "Lista")
+                and not st.session_state.get("dialogo_aberto"))
 
 
 if __name__ == "__main__":
