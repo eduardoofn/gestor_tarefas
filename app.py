@@ -255,7 +255,7 @@ div[data-testid="stExpander"] details {{ border-color: var(--linha) !important;
 /* Todo o visual dos componentes nativos vem daqui — o app não depende de
    .streamlit/config.toml, então funciona igual no local e no Streamlit Cloud. */
 .stApp, .stApp .stMarkdown p, .stApp .stMarkdown li {{ color: var(--ink); }}
-.stApp p, .stApp div, .stApp span {{ color: var(--ink); }}
+.stApp .stMarkdown {{ color: var(--ink) !important; }}
 [data-testid="stWidgetLabel"] p, .stApp label p, .stApp label {{
     color: var(--texto) !important; font-weight: 600; }}
 
@@ -1320,6 +1320,7 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                                    key="nav_sel", label_visibility="collapsed")
             if escolha != atual:
                 st.session_state.pagina = escolha
+                st.session_state.abrir_novo = False
                 rerun()
 
     with novo_c:
@@ -1360,6 +1361,7 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                         abrir_tarefa(n["tarefa_id"], user)
                     if fechar_c.button("✕", key=f"nx_{n['id']}", help="Descartar",
                                        **LARG_BTN):
+                        st.session_state.abrir_novo = False
                         descartar_notificacao(user, n["id"])
                         rerun()
                     if i < len(itens) - 1:
@@ -1370,15 +1372,18 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                 b1, b2, b3, _ = st.columns([1, 1, 1, 3])
                 if pendentes_n and b1.button("✓", key="notif_todas",
                                              help="Marcar todas como lidas", **LARG_BTN):
+                    st.session_state.abrir_novo = False
                     marcar_lidas(user)
                     rerun()
                 if itens and b2.button("🗑", key="notif_limpar",
                                        help="Limpar tudo", **LARG_BTN):
+                    st.session_state.abrir_novo = False
                     limpar_notificacoes(user)
                     rerun()
                 if b3.button("🔊" if ligado else "🔇", key="som_toggle",
                              help="Som ligado — clique para desligar" if ligado
                                   else "Som desligado — clique para ligar", **LARG_BTN):
+                    st.session_state.abrir_novo = False
                     st.session_state.som_ativo = not ligado
                     rerun()
         else:
@@ -1397,22 +1402,26 @@ def cabecalho(user: dict, paginas: list[str]) -> str:
                 if user["papel"] == "admin" and st.button("Usuários", key="cta_usuarios", **LARG_BTN):
                     st.session_state.pagina = "Usuários"
                     st.session_state.abrir_novo = False
+                    st.session_state.pagina_anterior = None
                     rerun()
                 if st.button("Minha conta", key="cta_conta", **LARG_BTN):
                     st.session_state.pagina = "Minha conta"
                     st.session_state.abrir_novo = False
+                    st.session_state.pagina_anterior = None
                     rerun()
                 auto = st.session_state.get("auto_atualizar", True)
                 if st.button(f"Atualização automática: {'ligada' if auto else 'desligada'}",
                              key="cta_auto", **LARG_BTN):
                     st.session_state.auto_atualizar = not auto
                     st.session_state.abrir_novo = False
+                    st.session_state.pagina_anterior = None
                     rerun()
                 claro = st.session_state.tema == "claro"
                 if st.button("Tema escuro" if claro else "Tema claro",
                              key="cta_tema", **LARG_BTN):
                     st.session_state.tema = "escuro" if claro else "claro"
                     st.session_state.abrir_novo = False
+                    st.session_state.pagina_anterior = None
                     rerun()
                 st.divider()
                 if st.button("Sair", key="sair", **LARG_BTN):
