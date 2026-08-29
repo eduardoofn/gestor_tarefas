@@ -109,7 +109,7 @@ ALTURA_MAX_TABELA = 620
 
 # Carimbo visível no menu da conta. Serve para responder de olho na tela a
 # pergunta "os arquivos novos entraram mesmo?" sem abrir editor nenhum.
-VERSAO = "v.0.1.17 · 28/08/2026"
+VERSAO = "v.0.1.18 · 28/08/2026"
 # Cada tique é uma reexecução inteira do app. Aumente se o quadro crescer
 # muito; desligue de vez pelo menu da conta.
 SEG_ATUALIZACAO = 90          # tique do sino nas telas de leitura
@@ -1280,6 +1280,18 @@ def fechar_paineis(exceto: str | None = None) -> None:
             st.session_state[bandeira] = None if bandeira != "abrir_novo" else False
 
 
+def ressincronizar_quadro() -> None:
+    """Força o componente do quadro a nascer de novo na próxima reexecução.
+
+    Recusar o movimento no Python não desfaz nada na tela: o quadro já moveu o
+    cartão no estado INTERNO dele e, como as propriedades chegam iguais às da
+    passada anterior, ele não tem motivo para se redesenhar — o cartão fica na
+    coluna errada até alguma outra coisa mudar. Trocar a chave do componente o
+    remonta do zero, e aí ele desenha o que o banco diz.
+    """
+    st.session_state.quadro_versao = st.session_state.get("quadro_versao", 0) + 1
+
+
 def abrir_tarefa(tid: int, user: dict) -> None:
     st.session_state.abrir_novo = False
     st.session_state.dup_lista = None
@@ -1807,6 +1819,10 @@ def form_conclusao(t: dict, user: dict, chave: str = "det", em_dialogo: bool = F
             cancelar = b2.form_submit_button("Cancelar", **LARG_FSB)
             if cancelar:
                 st.session_state.concluir_id = None
+                # Se a conclusão veio de um arrastar até Realizado, o cartão
+                # está lá na tela do componente. Desistir tem de trazê-lo de
+                # volta, senão a coluna mente até a próxima mudança de dados.
+                ressincronizar_quadro()
                 rerun()                    # dentro do diálogo, isto o fecha
             if enviar:
                 if not texto.strip():
@@ -1918,8 +1934,9 @@ def aba_kanban(tarefas: list[dict], user: dict) -> None:
             st.session_state.concluir_id = None
 
     tema = TEMAS[st.session_state.tema]
-    evento = quadro_kanban(montar_colunas(tarefas),
-                           {**tema, "marca": MARCA}, key="quadro_kanban")
+    evento = quadro_kanban(
+        montar_colunas(tarefas), {**tema, "marca": MARCA},
+        key=f"quadro_kanban_{st.session_state.get('quadro_versao', 0)}")
 
     if evento and evento.get("n") != st.session_state.get("ultimo_evento"):
         st.session_state.ultimo_evento = evento["n"]
@@ -1927,9 +1944,8 @@ def aba_kanban(tarefas: list[dict], user: dict) -> None:
         alvo = next((t for t in tarefas if t["id"] == evento.get("id")), None)
         if alvo:
             if evento["acao"] == "mover" and evento["para"] != alvo["status"]:
-                # O cartão travado volta sozinho para a coluna de origem: o
-                # quadro é redesenhado a partir do banco no rerun logo abaixo.
                 if aguardando_aprovacao(alvo):
+                    ressincronizar_quadro()
                     st.session_state.aviso = (
                         f"“{alvo['titulo']}” está aguardando aprovação. Enquanto "
                         f"@{alvo['criador']} não decidir, ela não se move.", "alerta")
@@ -1938,10 +1954,16 @@ def aba_kanban(tarefas: list[dict], user: dict) -> None:
                     if alvo.get("sou_responsavel") or pode_aprovar(alvo, user):
                         st.session_state.concluir_id = alvo["id"]
                     else:
+                        ressincronizar_quadro()
                         st.session_state.aviso = ("Só um responsável pode finalizar "
                                                   "esta tarefa.", "alerta")
                     rerun()
                 elif alterar_status(alvo, evento["para"], user):
+                    rerun()
+                else:
+                    # Recusa vinda do fundo (regra que a tela não previu): o
+                    # cartão precisa voltar para onde estava.
+                    ressincronizar_quadro()
                     rerun()
             elif evento["acao"] == "abrir":
                 abrir_tarefa(alvo["id"], user)
