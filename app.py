@@ -256,6 +256,9 @@ div[data-testid="stExpander"] details {{ border-color: var(--linha) !important;
    .streamlit/config.toml, então funciona igual no local e no Streamlit Cloud. */
 .stApp, .stApp .stMarkdown p, .stApp .stMarkdown li {{ color: var(--ink); }}
 .stApp .stMarkdown {{ color: var(--ink) !important; }}
+.stApp [data-testid="stText"] p, .stApp [data-testid="stText"] div, .stApp [data-testid="stText"] span,
+.stApp .stWrite p, .stApp .stWrite div, .stApp .stWrite span,
+.stApp p:not([class*="muted"]):not([class*="texto"]) {{ color: var(--ink) !important; }}
 [data-testid="stWidgetLabel"] p, .stApp label p, .stApp label {{
     color: var(--texto) !important; font-weight: 600; }}
 
