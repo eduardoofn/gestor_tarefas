@@ -109,7 +109,7 @@ ALTURA_MAX_TABELA = 620
 
 # Carimbo visível no menu da conta. Serve para responder de olho na tela a
 # pergunta "os arquivos novos entraram mesmo?" sem abrir editor nenhum.
-VERSAO = "v.0.1.18 · 28/08/2026"
+VERSAO = "v.0.1.19 · 28/08/2026"
 # Cada tique é uma reexecução inteira do app. Aumente se o quadro crescer
 # muito; desligue de vez pelo menu da conta.
 SEG_ATUALIZACAO = 90          # tique do sino nas telas de leitura
@@ -614,6 +614,22 @@ def aguardando_aprovacao(t: dict) -> bool:
     return t["status"] == "Realizado" and t.get("aprovacao") == "Pendente"
 
 
+def encerrada(t: dict) -> bool:
+    """Realizado com o aceite já dado: fim de linha.
+
+    Recusada não entra aqui — a recusa devolve a tarefa para Em andamento na
+    mesma operação, então nunca sobra Realizado + Recusada no banco.
+    """
+    return t["status"] == "Realizado" and t.get("aprovacao") != "Pendente"
+
+
+def congelada(t: dict) -> bool:
+    """Tarefa que não aceita mais mudança de status: ou espera o aceite, ou já
+    o teve. Reabrir uma tarefa aceita zerava a aprovação e mandava o solicitante
+    analisar de novo algo que ele já tinha analisado."""
+    return aguardando_aprovacao(t) or encerrada(t)
+
+
 def tamanho_legivel(bytes_: int) -> str:
     if bytes_ < 1024:
         return f"{bytes_} B"
@@ -1019,10 +1035,12 @@ def alterar_status(t: dict, novo: str, user: dict) -> bool:
     descrição de conclusão e o aceite do solicitante (ver enviar_conclusao).
 
     Com conclusão enviada e ainda sem aceite, a tarefa fica congelada: mexer no
-    status aqui apagaria a análise que está na mesa de quem pediu. A recusa
-    fica no fundo, e não só na tela, porque a mesma função é chamada pelo
-    arrastar do quadro e pelo seletor da tela de detalhe."""
-    if aguardando_aprovacao(t):
+    status aqui apagaria a análise que está na mesa de quem pediu. Depois do
+    aceite ela também não volta: reabrir zerava a aprovação e devolvia para o
+    solicitante uma conclusão que ele já tinha aceitado. A recusa fica no fundo,
+    e não só na tela, porque a mesma função é chamada pelo arrastar do quadro e
+    pelo seletor da tela de detalhe."""
+    if congelada(t):
         return False
     if novo == t["status"]:
         return False
@@ -1944,11 +1962,14 @@ def aba_kanban(tarefas: list[dict], user: dict) -> None:
         alvo = next((t for t in tarefas if t["id"] == evento.get("id")), None)
         if alvo:
             if evento["acao"] == "mover" and evento["para"] != alvo["status"]:
-                if aguardando_aprovacao(alvo):
+                if congelada(alvo):
                     ressincronizar_quadro()
                     st.session_state.aviso = (
                         f"“{alvo['titulo']}” está aguardando aprovação. Enquanto "
-                        f"@{alvo['criador']} não decidir, ela não se move.", "alerta")
+                        f"@{alvo['criador']} não decidir, ela não se move."
+                        if aguardando_aprovacao(alvo) else
+                        f"“{alvo['titulo']}” já foi concluída e aceita. Para "
+                        f"retomar o trabalho, duplique a tarefa.", "alerta")
                     rerun()
                 if evento["para"] == "Realizado":
                     if alvo.get("sou_responsavel") or pode_aprovar(alvo, user):
@@ -2592,15 +2613,24 @@ def tela_detalhe(tid: int, user: dict) -> None:
                                 f"<span class='meta'>ainda não abriu</span>",
                                 unsafe_allow_html=True)
 
-        if aguardando_aprovacao(t) and pode_gerenciar(t, user):
+        if congelada(t) and pode_gerenciar(t, user):
             with caixa():
                 st.markdown("##### Gerenciar")
-                st.markdown(
-                    "<div class='meta'>Tarefa <b>aguardando aprovação</b>. Status, "
-                    "prorrogação, anexos e comentários ficam parados até "
-                    f"@{esc(t['criador'])} aceitar ou recusar a conclusão. "
-                    "Excluir e duplicar continuam disponíveis.</div>",
-                    unsafe_allow_html=True)
+                if aguardando_aprovacao(t):
+                    st.markdown(
+                        "<div class='meta'>Tarefa <b>aguardando aprovação</b>. Status, "
+                        "prorrogação, anexos e comentários ficam parados até "
+                        f"@{esc(t['criador'])} aceitar ou recusar a conclusão. "
+                        "Excluir e duplicar continuam disponíveis.</div>",
+                        unsafe_allow_html=True)
+                else:
+                    st.markdown(
+                        "<div class='meta'>Tarefa <b>concluída e aceita</b>. O status "
+                        "não muda mais e não cabe prorrogação — reabrir aqui zeraria a "
+                        "aprovação e mandaria o solicitante analisar de novo o que já "
+                        "aceitou. Para retomar o trabalho, use <b>Duplicar tarefa</b>; "
+                        "o histórico da original fica preservado.</div>",
+                        unsafe_allow_html=True)
         elif pode_gerenciar(t, user):
             with caixa():
                 st.markdown("##### Gerenciar")
